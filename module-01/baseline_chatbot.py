@@ -6,7 +6,8 @@ def chatbot(user_message: str) -> str:
     response = ollama.chat(
         model="qwen3:8b",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": 
+             "You are a helpful assistant."},
             {"role": "user", "content": user_message}
         ]
     )
