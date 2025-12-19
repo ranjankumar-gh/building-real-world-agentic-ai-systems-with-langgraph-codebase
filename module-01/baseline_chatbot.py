@@ -16,4 +16,4 @@ def chatbot(user_message: str) -> str:
 # Test it
 print(chatbot("What's 25 * 17?"))
 print(chatbot("What's the weather in Tokyo?"))
-print(chatbot("Send an email to john@example.com"))
+print(chatbot("Send an email to mail@ranjankumar.in"))

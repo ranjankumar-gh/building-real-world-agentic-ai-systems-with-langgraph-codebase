@@ -82,7 +82,7 @@ An advanced implementation that extends the baseline chatbot with tool-calling c
 **Example interactions:**
 - "What's 25 * 17?" → Uses calculator tool
 - "What's the weather in Tokyo?" → Uses get_weather tool (works with local weather service)
-- "Send an email to john@example.com" → Uses send_email tool (simulated)
+- "Send an email to mail@ranjankumar.in" → Uses send_email tool (simulated)
 
 ### weather_api.py
 

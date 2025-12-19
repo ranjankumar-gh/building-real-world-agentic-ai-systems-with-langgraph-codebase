@@ -164,4 +164,4 @@ print("\n=== Test 2: Weather ===")
 print(agent_with_tools("What's the weather in Tokyo?"))
 
 print("\n=== Test 3: Email ===")
-print(agent_with_tools("Send an email to john@example.com with subject 'Meeting' and body 'Let's meet tomorrow'"))
+print(agent_with_tools("Send an email to mail@ranjankumar.in with subject 'Meeting' and body 'Let's meet tomorrow'"))
