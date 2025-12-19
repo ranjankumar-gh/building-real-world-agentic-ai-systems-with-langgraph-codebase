@@ -2,8 +2,9 @@
 
 This module contains implementations using Qwen3:8b hosted locally on Ollama:
 1. **Baseline Chatbot** - Simple question-answering chatbot
-2. **Agent with Tools** - Advanced agent that can use tools to accomplish tasks
-3. **Local Weather API Service** - FastAPI service that mimics OpenWeatherMap API for local development
+2. **Agent v1** - Agent with tool-calling capabilities
+3. **Agent v2** - Intelligent agent with conversation memory and reasoning
+4. **Local Weather API Service** - FastAPI service for mock weather data
 
 ## Prerequisites
 
@@ -37,9 +38,14 @@ pip install -r requirements.txt
 python baseline_chatbot.py
 ```
 
-**Agent with Tools:**
+**Agent v1 (with Tools):**
 ```bash
 python agent_v1.py
+```
+
+**Agent v2 (Intelligent Agent with Memory):**
+```bash
+python agent_v2.py
 ```
 
 **Local Weather API Service (run in separate terminal):**
@@ -84,6 +90,38 @@ An advanced implementation that extends the baseline chatbot with tool-calling c
 - "What's the weather in Tokyo?" → Uses get_weather tool (works with local weather service)
 - "Send an email to mail@ranjankumar.in" → Uses send_email tool (simulated)
 
+### agent_v2.py
+
+An intelligent agent that builds upon agent_v1 with enhanced capabilities including conversation memory and explicit reasoning.
+
+**Key Features:**
+
+1. **Conversation Memory** - Maintains conversation history across multiple turns
+2. **Explicit Reasoning** - Explains why it's using tools before executing them
+3. **Contextual Understanding** - Uses previous conversation context to understand references
+4. **Structured Output** - Returns detailed response including reasoning and actions taken
+
+**Available Tools:**
+- Same as agent_v1: calculator, get_weather, send_email
+
+**How it works:**
+- Maintains conversation history throughout the session
+- Provides reasoning for actions before executing tools
+- Returns a structured dictionary with:
+  - `response`: The agent's final answer
+  - `reasoning`: Explanation of the agent's thought process
+  - `actions`: List of tools used with inputs and outputs
+  - `conversation_history`: Full conversation context
+
+**Example multi-turn conversation:**
+1. User: "My name is Alice and I'm planning a trip to Tokyo"
+   - Agent remembers the name and destination
+2. User: "What's the weather there?"
+   - Agent understands "there" refers to Tokyo from context
+   - Calls weather tool and provides forecast
+3. User: "What was my name again?"
+   - Agent retrieves "Alice" from conversation history
+
 ### weather_api.py
 
 A local FastAPI service that provides mock weather data.
@@ -105,6 +143,7 @@ A local FastAPI service that provides mock weather data.
 
 - `baseline_chatbot.py` - Simple chatbot implementation
 - `agent_v1.py` - Agent with tool-calling capabilities
+- `agent_v2.py` - Intelligent agent with memory and reasoning
 - `weather_api.py` - Local weather API service (FastAPI)
 - `requirements.txt` - Python dependencies
 - `.env` - Environment variables (API keys, URLs)
@@ -128,9 +167,11 @@ The project uses a local weather service for development:
    python weather_api.py
    ```
 
-3. Run the agent (in another terminal):
+3. Run the agents (in another terminal):
    ```bash
    python agent_v1.py
+   # or
+   python agent_v2.py
    ```
 
 ### Additional Notes
