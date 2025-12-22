@@ -25,13 +25,89 @@ ollama list
 
 ## Setup
 
-### 1. Install Python Dependencies
+### Quick Start
+
+```bash
+# 1. Navigate to module-01
+cd module-01
+
+# 2. Create virtual environment
+python -m venv env
+
+# 3. Activate virtual environment
+# Windows: env\Scripts\activate
+# macOS/Linux: source env/bin/activate
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Ensure Ollama is running with qwen3:8b
+ollama pull qwen3:8b
+ollama serve
+
+# 6. Run any implementation (e.g., baseline chatbot)
+python baseline_chatbot.py
+```
+
+### 1. Create a Virtual Environment
+
+It's recommended to use a virtual environment to isolate project dependencies.
+
+Navigate to the module-01 directory:
+
+```bash
+cd module-01
+```
+
+**Create a virtual environment:**
+
+On Windows:
+```bash
+python -m venv env
+```
+
+On macOS/Linux:
+```bash
+python3 -m venv env
+```
+
+**Activate the virtual environment:**
+
+On Windows (Command Prompt):
+```bash
+env\Scripts\activate
+```
+
+On Windows (PowerShell):
+```bash
+env\Scripts\Activate.ps1
+```
+
+On macOS/Linux:
+```bash
+source env/bin/activate
+```
+
+You should see `(env)` prefix in your terminal, indicating the virtual environment is active.
+
+**Deactivate the virtual environment** (when you're done working):
+
+On all platforms:
+```bash
+deactivate
+```
+
+**Important Note:** The `env/` directory should be added to `.gitignore` to avoid committing virtual environment files to version control. This is already configured in most projects.
+
+### 2. Install Python Dependencies
+
+With the virtual environment activated, install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Run the Implementations
+### 3. Run the Implementations
 
 **Baseline Chatbot:**
 ```bash
