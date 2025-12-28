@@ -1,11 +1,11 @@
 # Core dependencies
 langchain>=0.1.0
-langchain-openai>=0.0.2
+langchain-ollama>=0.1.0
 langchain-community>=0.0.13
 langgraph>=0.0.20
 
 # Search tool
-duckduckgo-search>=4.0.0
+ddgs
 
 # Utilities
 python-dotenv>=1.0.0

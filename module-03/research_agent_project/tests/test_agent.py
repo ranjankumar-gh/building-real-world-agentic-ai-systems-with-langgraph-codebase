@@ -45,44 +45,41 @@ class TestConfiguration:
     
     def test_default_config(self):
         """Test default configuration."""
-        config = AgentConfig(openai_api_key="test-key")
-        
-        assert config.llm_model == "gpt-4"
+        config = AgentConfig()
+
+        assert config.llm_model == "qwen3:8b"
         assert config.llm_temperature == 0.0
         assert config.max_retries == 2
         assert config.search_limit == 3
+        assert config.ollama_base_url == "http://localhost:11434"
     
     def test_custom_config(self):
         """Test custom configuration."""
         config = AgentConfig(
-            llm_model="gpt-3.5-turbo",
+            llm_model="llama3:8b",
             llm_temperature=0.7,
             max_retries=5,
-            openai_api_key="test-key"
+            ollama_base_url="http://localhost:11434"
         )
-        
-        assert config.llm_model == "gpt-3.5-turbo"
+
+        assert config.llm_model == "llama3:8b"
         assert config.llm_temperature == 0.7
         assert config.max_retries == 5
+        assert config.ollama_base_url == "http://localhost:11434"
 
 
 class TestAgentCreation:
     """Test agent creation."""
-    
+
     def test_create_agent(self):
         """Test creating agent."""
-        # Set dummy API key for testing
-        os.environ["OPENAI_API_KEY"] = "test-key"
-        
         agent = create_research_agent()
         assert agent is not None
-    
+
     def test_agent_has_nodes(self):
         """Test that agent has all required nodes."""
-        os.environ["OPENAI_API_KEY"] = "test-key"
-        
         agent = create_research_agent()
-        
+
         # Agent should be compiled and ready
         assert hasattr(agent, 'invoke')
         assert hasattr(agent, 'stream')

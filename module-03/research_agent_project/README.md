@@ -70,7 +70,22 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env and add your OpenAI API key
+# Edit .env if you need to customize Ollama settings (optional)
+```
+
+### 5. Ensure Ollama is Running
+
+Make sure you have Ollama installed and the qwen3:8b model pulled:
+
+```bash
+# Install Ollama (if not already installed)
+# Visit https://ollama.ai for installation instructions
+
+# Pull the qwen3:8b model
+ollama pull qwen3:8b
+
+# Start Ollama (if not already running)
+ollama serve
 ```
 
 ## Quick Start
@@ -137,9 +152,10 @@ resumed = agent.invoke(None, config=config)
 
 ## Configuration
 
-Edit `src/research_agent/config.py` to customize:
+Edit `src/research_agent/config.py` or use environment variables to customize:
 
-- **LLM Model**: Change between GPT-4, Claude, etc.
+- **LLM Model**: Change between qwen3:8b, llama3, mistral, etc. (any Ollama model)
+- **Ollama Base URL**: Change if Ollama is running on a different host/port
 - **Temperature**: Adjust for deterministic/creative output
 - **Max Retries**: Set retry limit
 - **Search Limit**: Number of searches to execute
@@ -245,13 +261,16 @@ with ThreadPoolExecutor(max_workers=10) as executor:
 
 ## Troubleshooting
 
-### API Key Issues
+### Ollama Connection Issues
 
 ```
-Error: OpenAI API key not found
+Error: Failed to connect to Ollama
 ```
 
-**Solution**: Set `OPENAI_API_KEY` in `.env` file
+**Solution**:
+- Ensure Ollama is running: `ollama serve`
+- Check that the base URL is correct (default: http://localhost:11434)
+- Verify the model is pulled: `ollama pull qwen3:8b`
 
 ### Search Failures
 
