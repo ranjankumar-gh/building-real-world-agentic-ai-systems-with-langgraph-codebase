@@ -168,11 +168,7 @@ python examples/checkpoint_example.py
 
 ### State Flow
 
-```
-START → PLANNING → SEARCHING → VALIDATING → PROCESSING → GENERATING → END
-          ↓            ↓           ↓
-        ERROR ← → RETRY_SEARCH
-```
+![Figure: Multi-Stage Research Agent with Retry Logic](images/multi-stage-research-agent-with-retry-logic-figma.png)
 
 ### State Management
 
