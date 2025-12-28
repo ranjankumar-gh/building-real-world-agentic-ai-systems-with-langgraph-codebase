@@ -31,10 +31,10 @@ setup(
     python_requires=">=3.9",
     install_requires=[
         "langchain>=0.1.0",
-        "langchain-openai>=0.0.2",
+        "langchain-ollama>=0.1.0",
         "langchain-community>=0.0.13",
         "langgraph>=0.0.20",
-        "duckduckgo-search>=4.0.0",
+        "ddgs",
         "python-dotenv>=1.0.0",
     ],
     extras_require={

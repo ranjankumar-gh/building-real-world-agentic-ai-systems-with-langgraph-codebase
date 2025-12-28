@@ -11,7 +11,7 @@ Each node is a function that transforms state. Nodes are:
 """
 
 import logging
-from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import ResearchAgentState
@@ -21,20 +21,20 @@ from .tools import search_tool
 logger = logging.getLogger(__name__)
 
 
-def create_llm(config: AgentConfig = DEFAULT_CONFIG) -> ChatOpenAI:
+def create_llm(config: AgentConfig = DEFAULT_CONFIG) -> ChatOllama:
     """
     Create LLM instance with configuration.
-    
+
     Args:
         config: Agent configuration
-    
+
     Returns:
-        Configured ChatOpenAI instance
+        Configured ChatOllama instance
     """
-    return ChatOpenAI(
+    return ChatOllama(
         model=config.llm_model,
         temperature=config.llm_temperature,
-        api_key=config.openai_api_key
+        base_url=config.ollama_base_url
     )
 
 
@@ -200,6 +200,10 @@ def process_results(
     results = state["search_results"]
     query = state["research_query"]
     
+    # Log search results summary
+    valid_results = [r for r in results if "error" not in r]
+    logger.info(f"Processing {len(valid_results)} valid results out of {len(results)} total")
+    
     # Prepare results summary
     results_text = "\n\n".join([
         f"Query: {r['query']}\nResults: {r.get('result', 'N/A')}"
@@ -207,35 +211,56 @@ def process_results(
         if "error" not in r
     ])
     
+    logger.debug(f"Results text length: {len(results_text)} characters")
+    
     processing_prompt = f"""Based on these search results, identify 5 key findings related to: {query}
     
     Search Results:
     {results_text}
     
-    Extract concise, factual key findings (one sentence each)."""
+    Extract concise, factual key findings (one sentence each).
+    Format each finding as a bullet point starting with a dash (-)."""
     
     messages = [
         SystemMessage(content="You are a research analyst."),
         HumanMessage(content=processing_prompt)
     ]
     
+    logger.info("Invoking LLM to extract findings")
     response = llm.invoke(messages)
+    logger.debug(f"LLM response length: {len(response.content)} characters")
     
-    # Extract findings
-    findings = [
-        line.strip("- ").strip()
-        for line in response.content.split("\n")
-        if line.strip() and line.strip().startswith("-")
-    ]
+    # Extract findings - improved parsing
+    findings = []
+    for line in response.content.split("\n"):
+        line = line.strip()
+        # Check if line starts with common bullet formats
+        if line and (line.startswith("-") or line.startswith("•") or line.startswith("*")):
+            # Remove bullet marker and clean
+            finding = line.lstrip("-•* ").strip()
+            if finding:  # Only add non-empty findings
+                findings.append(finding)
+                logger.debug(f"Extracted finding {len(findings)}: {finding[:60]}...")
     
-    logger.info(f"Extracted {len(findings)} key findings")
+    # Limit to 5 findings as requested
+    findings = findings[:5]
+    
+    logger.info(f"Successfully extracted {len(findings)} key findings")
+    
+    # Log each finding for observability
+    if findings:
+        logger.info("Key findings extracted:")
+        for i, finding in enumerate(findings, 1):
+            logger.info(f"  Finding {i}: {finding[:100]}{'...' if len(finding) > 100 else ''}")
+    else:
+        logger.warning("No findings could be extracted from LLM response")
+        logger.debug(f"LLM response was: {response.content[:500]}...")
     
     return {
         "key_findings": findings,
         "current_stage": "generating",
         "messages": [response]
     }
-
 
 def generate_report(
     state: ResearchAgentState,
