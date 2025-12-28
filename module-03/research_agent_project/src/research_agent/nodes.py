@@ -39,25 +39,23 @@ def create_llm(config: AgentConfig = DEFAULT_CONFIG) -> ChatOllama:
 
 
 def plan_research(
-    state: ResearchAgentState,
-    config: AgentConfig = DEFAULT_CONFIG
+    state: ResearchAgentState
 ) -> dict:
     """
     Node 1: Planning - Create research plan and search queries.
-    
+
     This node analyzes the research query and breaks it down into
     specific search queries that will yield useful results.
-    
+
     Args:
         state: Current agent state
-        config: Agent configuration
-    
+
     Returns:
         State updates with research plan and search queries
     """
     logger.info(f"Planning research for: {state['research_query']}")
-    
-    llm = create_llm(config)
+
+    llm = create_llm(DEFAULT_CONFIG)
     query = state["research_query"]
     
     planning_prompt = f"""Create a research plan for: {query}
@@ -93,27 +91,25 @@ def plan_research(
 
 
 def execute_search(
-    state: ResearchAgentState,
-    config: AgentConfig = DEFAULT_CONFIG
+    state: ResearchAgentState
 ) -> dict:
     """
     Node 2: Search Execution - Execute web searches.
-    
+
     Runs each search query and collects results. Handles errors
     gracefully by recording them in results rather than crashing.
-    
+
     Args:
         state: Current agent state
-        config: Agent configuration
-    
+
     Returns:
         State updates with search results
     """
     queries = state["search_queries"]
-    logger.info(f"Executing {len(queries[:config.search_limit])} searches")
+    logger.info(f"Executing {len(queries[:DEFAULT_CONFIG.search_limit])} searches")
     
     all_results = []
-    for query in queries[:config.search_limit]:
+    for query in queries[:DEFAULT_CONFIG.search_limit]:
         try:
             logger.debug(f"Searching: {query}")
             result = search_tool.run(query)
@@ -139,28 +135,26 @@ def execute_search(
 
 
 def validate_results(
-    state: ResearchAgentState,
-    config: AgentConfig = DEFAULT_CONFIG
+    state: ResearchAgentState
 ) -> dict:
     """
     Node 3: Validation - Check if search results are sufficient.
-    
+
     Validates that we have enough good results to proceed with
     processing. If not, routes to error handler for retry.
-    
+
     Args:
         state: Current agent state
-        config: Agent configuration
-    
+
     Returns:
         State updates with validation result
     """
     results = state["search_results"]
     valid_results = [r for r in results if "error" not in r]
-    
+
     logger.info(f"Validating results: {len(valid_results)} valid out of {len(results)}")
-    
-    if len(valid_results) >= config.min_valid_results:
+
+    if len(valid_results) >= DEFAULT_CONFIG.min_valid_results:
         logger.info("Validation passed - proceeding to processing")
         return {
             "current_stage": "processing"
@@ -168,7 +162,7 @@ def validate_results(
     else:
         logger.warning(
             f"Validation failed - only {len(valid_results)} valid results "
-            f"(need {config.min_valid_results})"
+            f"(need {DEFAULT_CONFIG.min_valid_results})"
         )
         return {
             "current_stage": "error",
@@ -178,25 +172,23 @@ def validate_results(
 
 
 def process_results(
-    state: ResearchAgentState,
-    config: AgentConfig = DEFAULT_CONFIG
+    state: ResearchAgentState
 ) -> dict:
     """
     Node 4: Processing - Extract key findings from search results.
-    
+
     Uses LLM to analyze search results and extract the most
     important, relevant findings related to the research query.
-    
+
     Args:
         state: Current agent state
-        config: Agent configuration
-    
+
     Returns:
         State updates with extracted findings
     """
     logger.info("Processing search results")
-    
-    llm = create_llm(config)
+
+    llm = create_llm(DEFAULT_CONFIG)
     results = state["search_results"]
     query = state["research_query"]
     
@@ -263,25 +255,23 @@ def process_results(
     }
 
 def generate_report(
-    state: ResearchAgentState,
-    config: AgentConfig = DEFAULT_CONFIG
+    state: ResearchAgentState
 ) -> dict:
     """
     Node 5: Report Generation - Create final research report.
-    
+
     Synthesizes key findings into a structured, professional
     research report with executive summary and conclusion.
-    
+
     Args:
         state: Current agent state
-        config: Agent configuration
-    
+
     Returns:
         State updates with final report
     """
     logger.info("Generating final report")
-    
-    llm = create_llm(config)
+
+    llm = create_llm(DEFAULT_CONFIG)
     query = state["research_query"]
     findings = state["key_findings"]
     
@@ -314,19 +304,17 @@ def generate_report(
 
 
 def handle_error(
-    state: ResearchAgentState,
-    config: AgentConfig = DEFAULT_CONFIG
+    state: ResearchAgentState
 ) -> dict:
     """
     Node 6: Error Handler - Manage retry logic.
-    
+
     Decides whether to retry failed operations or fail gracefully.
     Implements retry counter logic to prevent infinite loops.
-    
+
     Args:
         state: Current agent state
-        config: Agent configuration
-    
+
     Returns:
         State updates with retry decision
     """
