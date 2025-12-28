@@ -9,11 +9,19 @@ This example demonstrates real-time streaming of agent execution:
 
 import sys
 import os
+import logging
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from research_agent import create_research_agent, create_initial_state
+
+# Configure logging to see agent progress
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
 
 
 def print_step(node_name: str, node_output: dict):
