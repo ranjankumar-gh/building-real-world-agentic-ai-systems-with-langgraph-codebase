@@ -215,8 +215,9 @@ def create_serpapi_tool(api_key: str):
 ```python
 # In your code
 config = AgentConfig(
-    llm_model="gpt-3.5-turbo",
+    llm_model="qwen3:8b",
     llm_temperature=0.7,
+    ollama_base_url="http://localhost:11434",
     max_retries=5,
     search_limit=5
 )
@@ -228,12 +229,12 @@ agent = create_research_agent()
 
 ### Core
 - `langchain` - LLM framework
-- `langchain-openai` - OpenAI integration
+- `langchain-ollama` - Ollama integration
 - `langchain-community` - Community tools
 - `langgraph` - Graph-based workflows
 
 ### Tools
-- `duckduckgo-search` - Web search
+- `ddgs` - Web search (DuckDuckGo)
 
 ### Utilities
 - `python-dotenv` - Environment variables
