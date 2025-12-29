@@ -6,12 +6,12 @@ This downloadable package contains a complete, production-ready Research Agent b
 
 ### What's Included:
 
-✅ **Complete Source Code** - Well-organized Python package  
-✅ **3 Working Examples** - Basic usage, streaming, checkpointing  
-✅ **Unit Tests** - pytest test suite  
-✅ **Documentation** - README, Quick Start, Project Structure guides  
-✅ **Configuration** - Environment setup, dependencies  
-✅ **Ready to Run** - Just add your API key and go  
+✅ **Complete Source Code** - Well-organized Python package
+✅ **3 Working Examples** - Basic usage, streaming, checkpointing
+✅ **Unit Tests** - pytest test suite
+✅ **Documentation** - README, Quick Start, Project Structure guides
+✅ **Configuration** - Environment setup, dependencies
+✅ **Ready to Run** - Just start Ollama and go  
 
 ### 📁 Project Structure (19 files):
 
@@ -69,12 +69,27 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Set up API key
+# Set up environment (optional)
 cp .env.example .env
-# Edit .env and add: OPENAI_API_KEY=your-key-here
+# Edit .env if you need to customize Ollama settings (optional)
 ```
 
-### 3. Run!
+### 3. Start Ollama
+
+Make sure Ollama is installed and running:
+
+```bash
+# Install Ollama (if not already installed)
+# Visit https://ollama.ai for installation instructions
+
+# Pull the qwen3:8b model
+ollama pull qwen3:8b
+
+# Start Ollama server (if not already running)
+ollama serve
+```
+
+### 4. Run!
 
 **Quick run:**
 ```bash
@@ -133,7 +148,7 @@ python run.py "Your custom research question"
 
 Edit `.env`:
 ```bash
-LLM_MODEL=gpt-3.5-turbo  # or claude-sonnet-4
+LLM_MODEL=qwen3:8b  # or llama3, mistral, etc. (any Ollama model)
 ```
 
 ### Adjust Retries
@@ -170,7 +185,7 @@ print(result["report"])
 ## 🔧 Requirements
 
 - **Python**: 3.9+
-- **API Key**: OpenAI (or Anthropic for Claude)
+- **LLM Backend**: Ollama (local, no API key needed)
 - **Internet**: For web searches
 
 ## 📝 Files Included
@@ -221,9 +236,10 @@ The code is designed to be extended:
 - Activate virtual environment
 - Run from project root
 
-**API key not found?**
-- Set `OPENAI_API_KEY` in `.env`
-- Or export as environment variable
+**Ollama connection issues?**
+- Ensure Ollama is running: `ollama serve`
+- Check that the base URL is correct (default: http://localhost:11434)
+- Verify the model is pulled: `ollama pull qwen3:8b`
 
 **Search failures?**
 - Check internet connection
@@ -249,8 +265,8 @@ cd research_agent_project
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your API key
+ollama pull qwen3:8b
+ollama serve  # In a separate terminal
 python run.py "Your first research question"
 ```
 

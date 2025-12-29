@@ -13,20 +13,26 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Step 2: Set API Key
+## Step 2: Start Ollama
+
+Make sure Ollama is installed and running with the qwen3:8b model:
 
 ```bash
-# Copy example environment file
-cp .env.example .env
+# Install Ollama (if not already installed)
+# Visit https://ollama.ai for installation instructions
 
-# Edit .env and add your OpenAI API key
-# OPENAI_API_KEY=sk-your-key-here
+# Pull the qwen3:8b model
+ollama pull qwen3:8b
+
+# Start Ollama server (if not already running)
+ollama serve
 ```
 
-Or export directly:
+Optional: Customize settings by editing `.env`:
 
 ```bash
-export OPENAI_API_KEY="sk-your-key-here"
+cp .env.example .env
+# Edit .env if you need to change model, temperature, or other settings
 ```
 
 ## Step 3: Run Your First Research
@@ -121,11 +127,14 @@ initial_state = create_initial_state(
 
 ## Troubleshooting
 
-**API Key Error?**
+**Ollama Connection Error?**
 ```
-Error: OpenAI API key not found
+Error: Failed to connect to Ollama
 ```
-Solution: Set `OPENAI_API_KEY` in `.env` file
+Solution:
+- Ensure Ollama is running: `ollama serve`
+- Check that the base URL is correct (default: http://localhost:11434)
+- Verify the model is pulled: `ollama pull qwen3:8b`
 
 **Import Errors?**
 ```
