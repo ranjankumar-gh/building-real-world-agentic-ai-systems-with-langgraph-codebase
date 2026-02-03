@@ -6,12 +6,12 @@ This downloadable package contains a complete, production-ready Research Agent b
 
 ### What's Included:
 
-✅ **Complete Source Code** - Well-organized Python package
-✅ **3 Working Examples** - Basic usage, streaming, checkpointing
-✅ **Unit Tests** - pytest test suite
-✅ **Documentation** - README, Quick Start, Project Structure guides
-✅ **Configuration** - Environment setup, dependencies
-✅ **Ready to Run** - Just start Ollama and go  
+- **Complete Source Code** - Well-organized Python package
+- **3 Working Examples** - Basic usage, streaming, checkpointing
+- **Unit Tests** - pytest test suite
+- **Documentation** - README, Quick Start, Project Structure guides
+- **Configuration** - Environment setup, dependencies
+- **Ready to Run** - Just start Ollama and go  
 
 ### 📁 Project Structure (19 files):
 
