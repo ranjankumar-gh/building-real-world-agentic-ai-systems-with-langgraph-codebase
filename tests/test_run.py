@@ -8,7 +8,10 @@ instance, so its test is skip-guarded behind `ATLAS_POSTGRES_TEST_DSN` and
 skips cleanly without one; it is not required for the rest of the suite to
 pass. See the README for how to point it at the seeded local Postgres
 service.
-"""
+
+Chapter 11, "Human-in-the-Loop", adds `run_to_approval` and
+`resume_approval` - the thread-scoped suspend/resume shape for the
+approval gate in `atlas/graph.py`."""
 
 import os
 
@@ -18,7 +21,14 @@ from langgraph.runtime import RunControl
 
 from atlas import graph as graph_module
 from atlas.graph import graph, run_durable
-from atlas.run import inspect, run_two_turns, run_with_drain, run_with_durability
+from atlas.run import (
+    inspect,
+    resume_approval,
+    run_to_approval,
+    run_two_turns,
+    run_with_drain,
+    run_with_durability,
+)
 
 requires_postgres = pytest.mark.skipif(
     not os.environ.get("ATLAS_POSTGRES_TEST_DSN"),
@@ -188,6 +198,42 @@ def test_run_with_drain_completes_normally_without_a_drain_request(monkeypatch):
 
     assert result is not None
     assert result["route"] == "answer"
+
+
+def test_run_to_approval_suspends_and_surfaces_the_proposed_refund(monkeypatch):
+    """"Suspend, surface, resume": driving Atlas's "refund" route through
+    `run_to_approval` returns with `__interrupt__` set instead of a finished
+    answer - the run is durably parked at the gate, not blocked in memory."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("refund")
+    )
+
+    result = run_to_approval(
+        "test-thread-run-to-approval",
+        {"id": "T-1001", "amount": 49.0},
+        "refund please",
+    )
+
+    assert "__interrupt__" in result
+    assert result["__interrupt__"][0].value["action"] == "issue_refund"
+
+
+def test_resume_approval_resumes_the_same_thread_and_completes_the_refund(
+    monkeypatch,
+):
+    """Hours later, on any worker: `resume_approval` invokes the SAME
+    thread_id with the human's decision and nothing else, and the refund
+    completes exactly once."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("refund")
+    )
+    thread_id = "test-thread-resume-approval"
+
+    run_to_approval(thread_id, {"id": "T-1001", "amount": 49.0}, "refund please")
+    result = resume_approval(thread_id, {"type": "approve"})
+
+    assert result["refund_done"] is True
+    assert result["messages"][-1].content.startswith("Refund of $")
 
 
 @requires_postgres

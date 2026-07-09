@@ -16,11 +16,19 @@ the checkpoint membrane, `async` for a read-only one, `exit` dev-only) - and
 call `.request_drain()` from a shutdown handler (any thread), and the run
 stops at the next superstep boundary with a resumable checkpoint instead of
 losing an in-flight conversation to a hard kill.
+
+Chapter 11, "Human-in-the-Loop", adds `run_to_approval` and
+`resume_approval` - "Suspend, surface, resume": driving Atlas's "refund"
+route now suspends at `atlas/graph.py`'s `approval_gate` instead of
+finishing. `run_to_approval` returns with `result["__interrupt__"]` set (the
+surfaced proposed refund); `resume_approval` invokes the SAME thread_id with
+a `Command(resume=decision)` carrying the human's decision - no new input,
+just the answer to the question the gate asked.
 """
 
 from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
-from langgraph.types import StateSnapshot
+from langgraph.types import Command, StateSnapshot
 
 from atlas.graph import graph
 
@@ -91,3 +99,24 @@ def run_with_drain(
         )
     except GraphDrained:
         return None
+
+
+def run_to_approval(thread_id: str, ticket: dict, message: str) -> dict:
+    """"Suspend, surface, resume": drive Atlas up to the approval gate. If
+    triage routes to "refund", the run now suspends at `approval_gate`
+    instead of crossing the membrane - the returned dict carries
+    `result["__interrupt__"]`, the surfaced payload awaiting a decision."""
+    config = {"configurable": {"thread_id": thread_id}}
+    return graph.invoke(
+        {"messages": [{"role": "user", "content": message}], "ticket": ticket},
+        config,
+    )
+
+
+def resume_approval(thread_id: str, decision: dict) -> dict:
+    """Resume a suspended approval gate on the SAME thread - no new input,
+    just the human's decision. `decision` becomes the return value of the
+    `interrupt()` call inside `approval_gate`, hours or a restart later, on
+    any worker."""
+    config = {"configurable": {"thread_id": thread_id}}
+    return graph.invoke(Command(resume=decision), config)

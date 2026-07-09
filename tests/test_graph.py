@@ -30,7 +30,17 @@ compensating by routing to `escalate`), the additive-migration-safe
 `refund_already_done` read, and `RETRIEVE_TIMEOUT` (a `TimeoutPolicy`
 exercised against `retrieve_async`, since Atlas's compiled topology has no
 async node of its own and the chapter's own example node, "research", does
-not exist in this repo)."""
+not exist in this repo).
+
+Chapter 11, "Human-in-the-Loop", adds `approval_gate` in front of the
+membrane `refund` crosses. `approval_gate`'s own routing logic (approve /
+edit / reject / unknown-decision) is tested in isolation below by
+monkeypatching `interrupt` - the same style already used for `classify` and
+`search_kb` - so these tests exercise the gate's decision logic without a
+real suspend/resume round trip. The end-to-end tests further down drive the
+REAL `interrupt()`/`Command(resume=...)` cycle through the compiled graph,
+proving the suspension is real (the run returns with `result["__interrupt__"]`
+set) and that resuming lands exactly where the chapter promises."""
 
 import asyncio
 from types import SimpleNamespace
@@ -48,6 +58,7 @@ from atlas.graph import (
     RETRIEVE_TIMEOUT,
     AtlasState,
     answer,
+    approval_gate,
     escalate,
     graph,
     refund,
@@ -242,12 +253,20 @@ def test_graph_compiles_with_the_figure_3_1_branching_topology():
     escalate joined by conditional edges. Chapter 10 adds `refund` - the
     checkpoint-membrane crossing - and its `error_handler` shows up as an
     internal `__error_handler__refund` pseudo-node, filtered out here the
-    same way `__start__`/`__end__` are."""
+    same way `__start__`/`__end__` are. Chapter 11 adds `approval_gate`,
+    sitting in front of `refund`."""
     node_names = {
         name for name in graph.get_graph().nodes if not name.startswith("__")
     }
 
-    assert node_names == {"triage", "retrieve", "answer", "escalate", "refund"}
+    assert node_names == {
+        "triage",
+        "retrieve",
+        "answer",
+        "escalate",
+        "approval_gate",
+        "refund",
+    }
 
 
 def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
@@ -445,19 +464,22 @@ def test_allowed_routes_grows_to_include_refund_across_the_membrane():
 def test_refund_charges_exactly_once_end_to_end_through_the_compiled_graph(
     monkeypatch,
 ):
-    """End-to-end: triage routes to "refund", the node calls the real
-    charge_refund from atlas.effects, and the completed run carries the
-    refund message plus refund_done=True."""
+    """End-to-end, through the Chapter 11 approval gate: triage routes to
+    "refund", which now lands on `approval_gate` first. Resuming with an
+    approve decision continues on to the real `refund` node, which calls
+    the real charge_refund from atlas.effects - the completed run carries
+    the refund message plus refund_done=True."""
     monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("refund"))
 
     config = {"configurable": {"thread_id": "test-thread-refund-e2e"}}
-    result = graph.invoke(
+    graph.invoke(
         {
             "messages": [{"role": "user", "content": "refund please"}],
-            "ticket": {"id": "T-1001"},
+            "ticket": {"id": "T-1001", "amount": 49.0},
         },
         config,
     )
+    result = graph.invoke(Command(resume={"type": "approve"}), config)
 
     assert result["refund_done"] is True
     assert result["messages"][-1].content.startswith("Refund of $")
@@ -466,9 +488,10 @@ def test_refund_charges_exactly_once_end_to_end_through_the_compiled_graph(
 def test_a_refund_that_keeps_failing_exhausts_retries_then_escalates_end_to_end(
     monkeypatch,
 ):
-    """The retry_policy/error_handler composition, end to end: three failed
-    attempts at charge_refund, then refund_failed compensates by routing to
-    escalate - the run finishes gracefully instead of crashing."""
+    """The retry_policy/error_handler composition, end to end, past an
+    approved gate: three failed attempts at charge_refund, then
+    refund_failed compensates by routing to escalate - the run finishes
+    gracefully instead of crashing."""
     monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("refund"))
     attempts = []
 
@@ -479,17 +502,154 @@ def test_a_refund_that_keeps_failing_exhausts_retries_then_escalates_end_to_end(
     monkeypatch.setattr(graph_module, "charge_refund", _always_fails)
 
     config = {"configurable": {"thread_id": "test-thread-refund-fails-e2e"}}
-    result = graph.invoke(
+    graph.invoke(
         {
             "messages": [{"role": "user", "content": "refund please"}],
-            "ticket": {"id": "T-1001"},
+            "ticket": {"id": "T-1001", "amount": 49.0},
         },
         config,
     )
+    result = graph.invoke(Command(resume={"type": "approve"}), config)
 
     assert len(attempts) == 3  # max_attempts on the refund node's RetryPolicy
     assert result["ticket"] == {"status": "escalated"}
     assert result["error"] == "refund failed after retries; needs manual review"
+
+
+# --- Chapter 11: the approval gate ----------------------------------------
+
+
+def test_approval_gate_surfaces_the_proposed_refund_and_approves_to_refund(
+    monkeypatch,
+):
+    """"Suspend, surface, resume": the gate calls interrupt() with the
+    proposed action, and an approve decision routes onward to refund with no
+    state update of its own."""
+    seen_payloads = []
+    monkeypatch.setattr(
+        graph_module,
+        "interrupt",
+        lambda payload: seen_payloads.append(payload) or {"type": "approve"},
+    )
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
+
+    result = approval_gate(state)
+
+    assert seen_payloads == [
+        {"action": "issue_refund", "ticket_id": "T-1001", "amount": 49.0}
+    ]
+    assert isinstance(result, Command)
+    assert result.goto == "refund"
+    assert result.update is None
+
+
+def test_approval_gate_rejects_and_routes_to_escalate_with_the_reason_recorded(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        graph_module,
+        "interrupt",
+        lambda payload: {"type": "reject", "reason": "duplicate refund request"},
+    )
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
+
+    result = approval_gate(state)
+
+    assert result.goto == "escalate"
+    assert result.update == {"error": "refund rejected: duplicate refund request"}
+
+
+def test_approval_gate_accepts_an_edit_within_policy_and_updates_the_ticket_amount(
+    monkeypatch,
+):
+    """The edit decision is untrusted input, re-validated against policy -
+    here it passes (the edited amount is within the original amount) and the
+    gate updates `ticket` before routing to refund."""
+    monkeypatch.setattr(
+        graph_module, "interrupt", lambda payload: {"type": "edit", "amount": 24.0}
+    )
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
+
+    result = approval_gate(state)
+
+    assert result.goto == "refund"
+    assert result.update == {"ticket": {"id": "T-1001", "amount": 24.0}}
+
+
+def test_approval_gate_rejects_an_out_of_policy_edit_and_escalates_instead(
+    monkeypatch,
+):
+    """A fat-fingered (or malicious) edit above the original amount must be
+    caught the same way a hallucinated tool argument is - it never reaches
+    refund."""
+    monkeypatch.setattr(
+        graph_module, "interrupt", lambda payload: {"type": "edit", "amount": 4900.0}
+    )
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
+
+    result = approval_gate(state)
+
+    assert result.goto == "escalate"
+    assert result.update == {"error": "edited amount 4900.0 out of policy"}
+
+
+def test_approval_gate_raises_on_an_unrecognized_decision_type(monkeypatch):
+    monkeypatch.setattr(
+        graph_module, "interrupt", lambda payload: {"type": "shrug"}
+    )
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
+
+    with pytest.raises(ValueError, match="unknown decision"):
+        approval_gate(state)
+
+
+def test_the_refund_route_suspends_at_the_approval_gate_end_to_end(monkeypatch):
+    """The durable-pause claim, exercised for real: no monkeypatched
+    interrupt here - the compiled graph's own checkpointer is what makes the
+    suspension possible. The run returns with `__interrupt__` set instead of
+    a finished answer, carrying the exact payload the gate proposed."""
+    monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("refund"))
+
+    config = {"configurable": {"thread_id": "test-thread-approval-suspend"}}
+    result = graph.invoke(
+        {
+            "messages": [{"role": "user", "content": "refund please"}],
+            "ticket": {"id": "T-1001", "amount": 49.0},
+        },
+        config,
+    )
+
+    assert "__interrupt__" in result
+    assert result["__interrupt__"][0].value == {
+        "action": "issue_refund",
+        "ticket_id": "T-1001",
+        "amount": 49.0,
+    }
+
+
+def test_resuming_with_an_edit_re_validates_before_crossing_the_membrane(
+    monkeypatch,
+):
+    """Exercise 2: submit an out-of-policy edit against a REAL suspended
+    gate and confirm it never reaches refund - the run escalates instead,
+    and refund_done stays unset."""
+    monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("refund"))
+
+    config = {"configurable": {"thread_id": "test-thread-approval-bad-edit"}}
+    graph.invoke(
+        {
+            "messages": [{"role": "user", "content": "refund please"}],
+            "ticket": {"id": "T-1001", "amount": 49.0},
+        },
+        config,
+    )
+    result = graph.invoke(
+        Command(resume={"type": "edit", "amount": 4900.0}), config
+    )
+
+    assert result.get("refund_done") is not True
+    assert result["ticket"] == {"status": "escalated"}
+    assert result["error"] == "edited amount 4900.0 out of policy"
 
 
 def test_timeout_policy_is_accepted_on_an_async_node():

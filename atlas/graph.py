@@ -70,7 +70,20 @@ this chapter keep resuming without raising. `TimeoutPolicy` is async-only
 (sync-node timeouts are rejected at compile); Atlas has no async node in its
 compiled topology yet, so `retrieve_async` - already defined-but-unused
 since Chapter 6 - is what the chapter's `TimeoutPolicy` example is exercised
-against in tests, rather than inventing a node Atlas does not have."""
+against in tests, rather than inventing a node Atlas does not have.
+
+Chapter 11, "Human-in-the-Loop", places the `approval_gate` node BEFORE the
+checkpoint membrane the `refund` node crosses. Triage's "refund" route no
+longer goes straight to `refund` - it goes to `approval_gate` first (see the
+`path_map` on `triage`'s conditional edges below), and `approval_gate` is
+the only node that decides whether `refund` ever runs. It calls
+`interrupt()` with the proposed action, which suspends the run to the
+checkpointer, and resumes with the human's decision as the return value of
+that same call. Approve and a re-validated edit route onward to `refund`
+via `Command(goto=...)`; reject routes to `escalate`. Because a resumed node
+re-runs from the top (see the chapter's "gotcha" callout), `approval_gate`
+does nothing but interrupt and route - no side effect lives here, the same
+membrane discipline Chapter 10 established for `refund` itself."""
 
 import asyncio
 from typing import Literal
@@ -80,7 +93,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, RetryPolicy, TimeoutPolicy
+from langgraph.types import Command, RetryPolicy, TimeoutPolicy, interrupt
 
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
@@ -185,6 +198,47 @@ def refund_already_done(state: AtlasState) -> bool:
     return state.get("refund_done", False)  # resumes old checkpoints safely
 
 
+def approval_gate(state: AtlasState) -> Command:
+    """Chapter 11: the approval gate, sitting BEFORE the membrane `refund`
+    crosses. `interrupt()` suspends the run to the checkpointer and surfaces
+    the proposed refund; the human's decision comes back as `decision`, the
+    return value of that same `interrupt()` call, once someone resumes the
+    thread with `Command(resume=...)`.
+
+    Approve and a re-validated edit route onward to `refund`; reject routes
+    to `escalate`. This node does nothing else - on resume, LangGraph
+    re-runs it from the top, so any side effect placed before `interrupt()`
+    would fire again on every resume. See "A resumed node re-runs from the
+    top"."""
+    ticket = state["ticket"]
+    decision = interrupt(
+        {
+            "action": "issue_refund",
+            "ticket_id": ticket["id"],
+            "amount": ticket["amount"],
+        }
+    )
+    if decision["type"] == "approve":
+        return Command(goto="refund")
+    if decision["type"] == "edit":
+        amount = decision["amount"]
+        if not 0 < amount <= ticket["amount"]:  # re-validate the human's edit
+            return Command(
+                update={"error": f"edited amount {amount} out of policy"},
+                goto="escalate",
+            )
+        return Command(
+            update={"ticket": {**ticket, "amount": amount}},
+            goto="refund",
+        )
+    if decision["type"] == "reject":
+        return Command(
+            update={"error": f"refund rejected: {decision.get('reason', '')}"},
+            goto="escalate",
+        )
+    raise ValueError(f"unknown decision: {decision['type']}")
+
+
 def refund(state: AtlasState, config: RunnableConfig) -> dict:
     """Atlas's first crossing of the checkpoint membrane. The idempotency
     key is derived from durable state (`thread_id` + `ticket_id`), so a
@@ -219,6 +273,10 @@ builder.add_node(
 )
 builder.add_node("answer", answer)
 builder.add_node("escalate", escalate)
+# Chapter 11: the approval gate - no retry_policy, no side effect. It only
+# interrupts and routes; retrying a suspended interrupt is not the same kind
+# of retry Chapter 10 earned for refund.
+builder.add_node("approval_gate", approval_gate)
 builder.add_node(
     "refund",
     refund,
@@ -230,11 +288,27 @@ builder.add_node(
 )
 
 builder.add_edge(START, "triage")
-builder.add_conditional_edges("triage", route_from_triage)  # the branch
+# Chapter 11: triage's "refund" route now lands on the approval gate, not on
+# refund directly - the gate decides whether refund ever runs. ALLOWED_ROUTES
+# and route_from_triage are unchanged; only the physical destination for the
+# "refund" route moves behind the gate.
+builder.add_conditional_edges(
+    "triage",
+    route_from_triage,
+    {
+        "answer": "answer",
+        "retrieve": "retrieve",
+        "escalate": "escalate",
+        "refund": "approval_gate",
+    },
+)
 builder.add_conditional_edges("retrieve", route_after_retrieve)  # the cycle + its exit
 builder.add_edge("answer", END)
 builder.add_edge("escalate", END)
 builder.add_edge("refund", END)
+# approval_gate has no static outgoing edge - it always returns a Command
+# with goto="refund" or goto="escalate", the same dynamic-routing shape
+# triage_with_command uses above.
 
 # Chapter 9: compiled onto a checkpointer, so every superstep is saved. The
 # dev/test default - RAM-backed, gone on restart, but the right tool for
