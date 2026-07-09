@@ -15,6 +15,13 @@ LastValue channels for the bounded retrieval retry and its recovery path:
 instead of leaning on the recursion limit) and `error` (set only when
 `retrieve` catches a `KnowledgeBaseUnavailable` failure, read with
 `state.get("error")` since it is not written on every path).
+
+Chapter 10, "Durable Execution, Long-Running Workflows, and State
+Migration", adds `refund_done` - ADDITIVE, on purpose: a checkpoint written
+before this chapter has no such key, and subscript access on it would raise
+when that old checkpoint resumes. Read it with `state.get("refund_done",
+False)`, never `state["refund_done"]`, so pre-Chapter-10 checkpoints keep
+resuming safely (see "State migration without downtime").
 """
 
 from typing import Annotated, TypedDict
@@ -51,3 +58,4 @@ class AtlasState(TypedDict):
     route: str  # one writer per step, guarded (LastValue)
     retrieve_attempts: int  # the explicit loop guard; LastValue (only retrieve writes it)
     error: str | None  # recorded tool failure; LastValue (only retrieve writes it)
+    refund_done: bool  # NEW this chapter - additive, read with a default

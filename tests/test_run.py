@@ -14,10 +14,11 @@ import os
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.runtime import RunControl
 
 from atlas import graph as graph_module
 from atlas.graph import graph, run_durable
-from atlas.run import inspect, run_two_turns
+from atlas.run import inspect, run_two_turns, run_with_drain, run_with_durability
 
 requires_postgres = pytest.mark.skipif(
     not os.environ.get("ATLAS_POSTGRES_TEST_DSN"),
@@ -119,6 +120,74 @@ def test_two_different_threads_do_not_share_history(monkeypatch):
     contents_b = [m.content for m in snapshot_b.values["messages"]]
 
     assert "customer A's secret" not in contents_b
+
+
+def test_run_with_durability_defaults_to_sync_and_still_returns_the_normal_result(
+    monkeypatch,
+):
+    """"Persist before you proceed": durability is a per-path choice, not a
+    silently-accepted default - the sync path still returns the same shape
+    of result as a plain invoke."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+    )
+
+    result = run_with_durability("test-thread-durability-sync", "hi")
+
+    assert result["route"] == "answer"
+
+
+def test_run_with_durability_accepts_the_async_mode_for_read_only_paths(monkeypatch):
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+    )
+
+    result = run_with_durability(
+        "test-thread-durability-async", "hi", durability="async"
+    )
+
+    assert result["route"] == "answer"
+
+
+def test_run_with_drain_returns_none_when_a_drain_was_already_requested(monkeypatch):
+    """Graceful drain for deploys: a RunControl with `.request_drain()`
+    already called stops the run at the next superstep boundary and raises
+    `GraphDrained` - caught and turned into None, with a resumable
+    checkpoint left behind for the same thread_id."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
+    control = RunControl()
+    control.request_drain()
+
+    result = run_with_drain("test-thread-drain", "hi", control=control)
+
+    assert result is None
+    snapshot = inspect("test-thread-drain")
+    assert snapshot.next == ("__start__",)
+
+
+def test_run_with_drain_completes_normally_without_a_drain_request(monkeypatch):
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+    )
+
+    result = run_with_drain("test-thread-no-drain", "hi")
+
+    assert result is not None
+    assert result["route"] == "answer"
 
 
 @requires_postgres

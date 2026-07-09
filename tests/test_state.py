@@ -70,6 +70,14 @@ def test_atlas_state_retrieve_attempts_and_error_have_no_reducer_annotation():
     assert get_origin(AtlasState.__annotations__["error"]) is not Annotated
 
 
+def test_atlas_state_refund_done_is_additive_and_has_no_reducer_annotation():
+    """Chapter 10's new field: a plain LastValue bool, added additively so a
+    checkpoint written before this chapter (which has no `refund_done` key
+    at all) still resumes - see atlas/graph.py's `refund_already_done`."""
+    assert "refund_done" in AtlasState.__annotations__
+    assert get_origin(AtlasState.__annotations__["refund_done"]) is not Annotated
+
+
 def test_retrieved_channel_merges_parallel_fan_out_without_duplicates():
     """Reproduces the hook's incident directly on AtlasState: three sources
     fan out from START in the same superstep and write `retrieved`. Because

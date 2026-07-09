@@ -7,8 +7,19 @@
 that id *is* the conversation's identity. Reuse one across customers and
 their histories merge (a privacy incident); mint a fresh one every turn and
 you lose continuity. Derive it from a stable identity, like a ticket id.
+
+Chapter 10, "Durable Execution, Long-Running Workflows, and State
+Migration", adds `run_with_durability` - "Persist before you proceed":
+durability is a deliberate per-path choice (`sync` for a run that crosses
+the checkpoint membrane, `async` for a read-only one, `exit` dev-only) - and
+`run_with_drain`, the graceful-drain shape for deploys: pass a `RunControl`,
+call `.request_drain()` from a shutdown handler (any thread), and the run
+stops at the next superstep boundary with a resumable checkpoint instead of
+losing an in-flight conversation to a hard kill.
 """
 
+from langgraph.errors import GraphDrained
+from langgraph.runtime import RunControl
 from langgraph.types import StateSnapshot
 
 from atlas.graph import graph
@@ -41,3 +52,42 @@ def inspect(thread_id: str) -> StateSnapshot:
     made visible: a new process, same thread_id, picks up from here."""
     config = {"configurable": {"thread_id": thread_id}}
     return graph.get_state(config)
+
+
+def run_with_durability(
+    thread_id: str, message: str, durability: str = "sync"
+) -> dict:
+    """"Persist before you proceed": durability is a per-path choice, not a
+    default to accept. `"sync"` for a run that crosses the checkpoint
+    membrane (the completion record must be durable before anything
+    downstream depends on it); `"async"` for a read-only path; `"exit"` is a
+    development convenience, never a production setting for side-effecting
+    work."""
+    config = {"configurable": {"thread_id": thread_id}}
+    return graph.invoke(
+        {"messages": [{"role": "user", "content": message}]},
+        config,
+        durability=durability,
+    )
+
+
+def run_with_drain(
+    thread_id: str, message: str, control: RunControl | None = None
+) -> dict | None:
+    """Graceful drain for deploys: a `RunControl` passed as `control=` can
+    have `.request_drain()` called on it from any thread (a SIGTERM handler,
+    an orchestrator preStop hook). The run stops at the next superstep
+    boundary, not mid-node, and raises `GraphDrained` - caught here and
+    turned into `None`, since the checkpoint it left is a normal resumption
+    boundary: the same `thread_id` resumes it once the new version is up."""
+    config = {"configurable": {"thread_id": thread_id}}
+    control = control if control is not None else RunControl()
+    try:
+        return graph.invoke(
+            {"messages": [{"role": "user", "content": message}]},
+            config,
+            control=control,
+            durability="sync",
+        )
+    except GraphDrained:
+        return None

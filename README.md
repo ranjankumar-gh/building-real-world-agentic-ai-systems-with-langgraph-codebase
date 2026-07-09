@@ -38,6 +38,13 @@ without one - they are not required for the rest of the suite to pass.
   already in this repo's `pyproject.toml`). Its test is skip-guarded behind
   `ATLAS_POSTGRES_TEST_DSN`; set it to a reachable Postgres connection string (for example
   `postgresql://atlas:atlas@localhost:5432/atlas`) to exercise it, otherwise it skips cleanly.
+- **Chapter 10, Durable Execution, Long-Running Workflows, and State Migration.** Atlas's first
+  crossing of the checkpoint membrane: `atlas/effects.py` (new) holds the stable idempotency key
+  and the idempotent `charge_refund` operation; `atlas/graph.py`'s `refund` node calls them and
+  carries a `retry_policy` plus an `error_handler` (`refund_failed`) that compensates by routing to
+  `escalate`. `atlas/state.py` adds `refund_done` additively. No external service or skip guard is
+  needed - everything runs against the seeded, in-memory refund/ticket backends already in the
+  repo.
 
 ## Reading paths
 
