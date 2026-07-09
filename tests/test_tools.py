@@ -1,4 +1,6 @@
 """Chapter 7, "Tools, Models, MCP, and create_agent" - atlas/tools.py.
+Chapter 16, "The Supervisor Pattern (and Swarm as Contrast)", adds coverage
+for `web_search_tool`.
 
 See "Building Atlas's real tools" and "Reading the result: content blocks,
 not guesswork". These are the tools a tool-calling model actually calls -
@@ -15,6 +17,7 @@ from atlas.tools import (
     search_kb,
     set_ticket_status,
     text_of,
+    web_search_tool,
 )
 
 
@@ -99,3 +102,15 @@ def test_text_of_joins_multiple_text_blocks_and_skips_non_text_blocks():
     )
 
     assert text_of(message) == "Part one. Part two."
+
+
+def test_web_search_tool_answers_a_matching_query():
+    result = web_search_tool.invoke({"query": "What is LangGraph?"})
+
+    assert "orchestration" in result.lower()
+
+
+def test_web_search_tool_reports_no_match_for_an_unrelated_query():
+    result = web_search_tool.invoke({"query": "best pizza in town"})
+
+    assert result == "No web result matched."
