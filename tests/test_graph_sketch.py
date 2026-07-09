@@ -1,6 +1,10 @@
 """Chapter 3: atlas/graph_sketch.py - node SHAPES obey the state-transition
 discipline (read state, return a delta, decide nothing about what runs next).
-No StateGraph exists yet; that is Chapter 4."""
+No StateGraph exists yet; that is Chapter 4.
+
+Chapter 7 fills in `classify` for real (atlas.triage), so `triage` here no
+longer propagates a NotImplementedError when called unmocked - `retrieve`
+still does, via the still-stubbed `search_kb`."""
 
 import pytest
 
@@ -61,6 +65,8 @@ def test_answer_calls_compose_answer_and_wraps_its_result_in_a_delta(monkeypatch
     assert delta == {"messages": ["reply"]}
 
 
-def test_triage_propagates_the_classify_stub_until_chapter_7_fills_it_in():
+def test_retrieve_propagates_the_search_kb_stub_which_is_still_unfilled():
+    """classify went real in Chapter 7 (see atlas/triage.py); search_kb has
+    not - atlas/helpers.py's stub still raises NotImplementedError."""
     with pytest.raises(NotImplementedError):
-        triage(_state(messages=["hi"]))
+        retrieve(_state(messages=["hi"]))

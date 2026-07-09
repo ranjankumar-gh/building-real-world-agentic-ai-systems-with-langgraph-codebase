@@ -26,9 +26,21 @@ defined but unused - the chapter's own guidance is to default to conditional
 edges and reach for `Command` only when the update and the route are
 genuinely one decision.
 
-The node bodies call the same stubs as graph_sketch.py (atlas.helpers:
-classify/search_kb/compose_answer), which raise NotImplementedError until
-Chapter 7 fills them in for real.
+The node bodies originally called stubs in atlas.helpers
+(classify/search_kb/compose_answer), which raised NotImplementedError.
+
+Chapter 7, "Tools, Models, MCP, and create_agent", replaces `classify` with
+the real, structured-output version in `atlas/triage.py` - `triage` below
+now reads a validated `TriageResult` instead of parsing a raw string, but
+still validates `.route` against `ALLOWED_ROUTES` (the routing boundary
+holds; structured output narrows the input, it does not dissolve the
+boundary). `search_kb` also went real in that chapter, as a `@tool` in
+`atlas/tools.py` - along with `KnowledgeBaseUnavailable`, imported from
+there now instead of atlas.helpers - but `retrieve` and `answer` below are
+not yet rewired to call it: that integration (folding a tool-calling agent
+into this graph) is deferred to a later chapter, so `retrieve`/`answer`
+still call the atlas.helpers stubs for `search_kb`/`compose_answer` shape
+continuity until then. See atlas/helpers.py's module docstring.
 """
 
 import asyncio
@@ -37,16 +49,18 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
-from atlas.helpers import KnowledgeBaseUnavailable, classify, compose_answer, search_kb
+from atlas.helpers import compose_answer, search_kb
 from atlas.state import AtlasState
+from atlas.tools import KnowledgeBaseUnavailable
+from atlas.triage import classify
 
 ALLOWED_ROUTES = ("answer", "retrieve", "escalate")
 MAX_RETRIEVE_ATTEMPTS = 3
 
 
 def triage(state: AtlasState) -> dict:
-    proposed = classify(state["messages"])  # the model proposes
-    route = proposed if proposed in ALLOWED_ROUTES else "escalate"  # the graph disposes
+    decision = classify(state["messages"])  # typed; route is already constrained
+    route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
     return {"route": route}
 
 
@@ -57,8 +71,8 @@ def triage_with_command(
     state and name the next node in one move, for when the two are genuinely
     the same decision. Not wired into `builder` - `triage` above stays the
     default, since it keeps routing visible on a separate edge."""
-    proposed = classify(state["messages"])
-    route = proposed if proposed in ALLOWED_ROUTES else "escalate"
+    decision = classify(state["messages"])
+    route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
     return Command(update={"route": route}, goto=route)
 
 

@@ -7,15 +7,22 @@ inside a node body. Chapter 4 wires this into a real, running StateGraph
 (atlas/graph.py); Chapter 6 turns route_after_triage into a conditional edge and
 adds the escalate branch and the bounded retrieve retry.
 
-The helpers imported below (classify, search_kb, compose_answer) are stubs in
-atlas/helpers.py, filled in for real in Chapter 7 - importing them here lets these
-node shapes read as real functions instead of pseudocode, even though calling them
-raises NotImplementedError until then.
+The helpers imported below (classify, search_kb, compose_answer) were stubs in
+atlas/helpers.py - importing them here let these node shapes read as real
+functions instead of pseudocode, even though calling them raised
+NotImplementedError.
+
+Chapter 7, "Tools, Models, MCP, and create_agent", fills `classify` in for
+real (a validated TriageResult, in atlas/triage.py) - imported from there
+now. `search_kb` and `compose_answer` are still stubs in atlas/helpers.py;
+this whiteboard sketch calls whatever that module currently provides,
+same as it always has.
 """
 
 from typing import Literal, TypedDict
 
-from atlas.helpers import classify, compose_answer, search_kb
+from atlas.helpers import compose_answer, search_kb
+from atlas.triage import classify
 
 
 class AtlasState(TypedDict):

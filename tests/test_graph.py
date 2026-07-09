@@ -6,11 +6,19 @@ monkeypatched stubs rather than a real knowledge base or model.
 Chapter 6, "Conditional Edges and Dynamic Control Flow", adds the branching
 topology: route validation in `triage`, the two conditional routing
 functions, the bounded `retrieve` retry, the `escalate` node, and the
-`Command`-based `triage_with_command` alternative."""
+`Command`-based `triage_with_command` alternative.
+
+Chapter 7, "Tools, Models, MCP, and create_agent", replaces `classify` with
+a real, structured-output version (atlas.triage.classify) that returns a
+validated TriageResult instead of a raw string - `triage`/`triage_with_command`
+now read `.route` off that object. These tests monkeypatch `classify` with a
+small stand-in (`_decision`) that exposes the same `.route` attribute, so the
+routing-boundary behavior can still be exercised without a live model call.
+`KnowledgeBaseUnavailable` also moves, to atlas.tools."""
 
 import asyncio
+from types import SimpleNamespace
 
-import pytest
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
@@ -29,7 +37,7 @@ from atlas.graph import (
     triage,
     triage_with_command,
 )
-from atlas.helpers import KnowledgeBaseUnavailable
+from atlas.tools import KnowledgeBaseUnavailable
 
 
 def _state(**overrides) -> AtlasState:
@@ -45,8 +53,17 @@ def _state(**overrides) -> AtlasState:
     return base
 
 
+def _decision(route: str):
+    """Stand-in for a validated TriageResult - just enough shape (`.route`)
+    for `triage`/`triage_with_command` to read, without going through the
+    real Pydantic-validated agent or a live model call."""
+    return SimpleNamespace(route=route)
+
+
 def test_triage_calls_classify_and_wraps_its_result_in_a_delta(monkeypatch):
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "retrieve")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
 
     delta = triage(_state(messages=["hi"]))
 
@@ -56,11 +73,14 @@ def test_triage_calls_classify_and_wraps_its_result_in_a_delta(monkeypatch):
 def test_triage_falls_back_to_escalate_when_the_model_proposes_an_off_menu_route(
     monkeypatch,
 ):
-    """The routing boundary: whatever the model invents - a made-up node
-    name, an empty string, a whole sentence - collapses to the safe default
-    rather than becoming an invalid transition."""
+    """The routing boundary still holds as defense in depth even though a
+    real TriageResult's `.route` is already Pydantic-constrained to the
+    three legal values: an off-menu value on the object still collapses to
+    the safe default rather than becoming an invalid transition."""
     for proposed in ("lookup_order", "", "RETRIEVE ", "Let me check on that."):
-        monkeypatch.setattr(graph_module, "classify", lambda messages, p=proposed: p)
+        monkeypatch.setattr(
+            graph_module, "classify", lambda messages, p=proposed: _decision(p)
+        )
 
         delta = triage(_state(messages=["hi"]))
 
@@ -69,7 +89,9 @@ def test_triage_falls_back_to_escalate_when_the_model_proposes_an_off_menu_route
 
 def test_triage_never_proposes_a_route_outside_the_allowed_set(monkeypatch):
     for allowed in ALLOWED_ROUTES:
-        monkeypatch.setattr(graph_module, "classify", lambda messages, a=allowed: a)
+        monkeypatch.setattr(
+            graph_module, "classify", lambda messages, a=allowed: _decision(a)
+        )
 
         delta = triage(_state(messages=["hi"]))
 
@@ -79,7 +101,9 @@ def test_triage_never_proposes_a_route_outside_the_allowed_set(monkeypatch):
 def test_triage_with_command_updates_state_and_names_the_next_node_together(
     monkeypatch,
 ):
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "retrieve")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
 
     result = triage_with_command(_state(messages=["hi"]))
 
@@ -91,7 +115,9 @@ def test_triage_with_command_updates_state_and_names_the_next_node_together(
 def test_triage_with_command_also_falls_back_to_escalate_on_an_off_menu_route(
     monkeypatch,
 ):
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "lookup_order")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("lookup_order")
+    )
 
     result = triage_with_command(_state(messages=["hi"]))
 
@@ -195,13 +221,6 @@ def test_graph_compiles_with_the_figure_3_1_branching_topology():
     assert node_names == {"triage", "retrieve", "answer", "escalate"}
 
 
-def test_invoking_the_compiled_graph_propagates_the_classify_stub_until_chapter_7():
-    """No StateGraph wiring can paper over a stub: the runtime runs triage
-    first, which still calls the real (unimplemented) classify()."""
-    with pytest.raises(NotImplementedError):
-        graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
-
-
 def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
     monkeypatch,
 ):
@@ -209,7 +228,9 @@ def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
     returns is APPENDED to the conversation, not swapped in for it. Routing
     straight to "answer" also proves triage's conditional edge can bypass
     retrieve entirely."""
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "answer")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
         graph_module,
@@ -234,7 +255,9 @@ def test_a_query_that_keeps_coming_back_empty_retries_then_escalates_gracefully(
     """The chapter's central claim, exercised end to end: an empty
     retrieval retries exactly MAX_RETRIEVE_ATTEMPTS times and then escalates -
     it never raises GraphRecursionError."""
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "retrieve")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
 
     result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
@@ -249,7 +272,9 @@ def test_a_failing_knowledge_base_routes_to_escalate_instead_of_a_fake_answer(
     def _boom(messages):
         raise KnowledgeBaseUnavailable("knowledge base is down")
 
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "retrieve")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
     monkeypatch.setattr(graph_module, "search_kb", _boom)
 
     result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
@@ -261,7 +286,9 @@ def test_a_failing_knowledge_base_routes_to_escalate_instead_of_a_fake_answer(
 def test_an_off_menu_triage_route_escalates_without_ever_reaching_a_bad_node(
     monkeypatch,
 ):
-    monkeypatch.setattr(graph_module, "classify", lambda messages: "lookup_order")
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("lookup_order")
+    )
 
     result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
 
