@@ -1,4 +1,5 @@
 """Chapter 7, "Tools, Models, MCP, and create_agent" - the tool-using agent.
+Chapter 8, "The Middleware System", adds the middleware stack.
 
 See "Building Atlas's real tools" (binding the model) and "Reaching
 external tools with MCP". `resolve_agent` is a standalone tool-calling
@@ -18,12 +19,23 @@ agent code is otherwise identical either way. `build_resolve_agent` (async,
 further down) is the chapter's own name for the MCP-connected builder from
 "Reaching external tools with MCP" - kept exactly, since Exercise 2 refers
 to it by that name.
+
+Chapter 8, "Composing the stack", attaches `atlas/middleware.py`'s stack to
+`resolve_agent` via the `middleware=` argument - PII redaction, history
+summarization, the custom `AuthorityGate`, and the `HumanInTheLoopMiddleware`
+placeholder, in that order (list order is nesting order; first = outermost).
+The chapter's own code sample shows `model="claude-sonnet-4-6"` for brevity,
+but `resolve_agent` keeps the Chapter 7 configured `init_chat_model` instance
+below (`temperature=0, max_tokens=1024`) rather than silently dropping it -
+the middleware argument is the only thing this chapter's increment changes
+about `resolve_agent`.
 """
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from atlas.middleware import AuthorityGate, approval, pii, summarizer
 from atlas.tools import lookup_ticket, search_kb, set_ticket_status
 
 RESOLVE_TOOLS = [search_kb, lookup_ticket, set_ticket_status]
@@ -45,8 +57,15 @@ def build_resolve_agent_from_model_id(model_id: str = "claude-sonnet-4-6"):
 # (temperature, token caps, timeouts). This is the module's live default.
 model = init_chat_model("claude-sonnet-4-6", temperature=0, max_tokens=1024)
 resolve_agent = create_agent(
-    model=model, tools=RESOLVE_TOOLS, system_prompt=RESOLVE_PROMPT
+    model=model,
+    tools=RESOLVE_TOOLS,
+    system_prompt=RESOLVE_PROMPT,
+    middleware=[pii, summarizer, AuthorityGate(), approval],  # <1>
 )
+
+# 1. Order is the whole point: the first entry is the outermost wrapper, so
+#    PII redaction runs before summarization and before the model ever sees
+#    the raw text. See "Composing the stack".
 
 
 async def build_resolve_agent():
