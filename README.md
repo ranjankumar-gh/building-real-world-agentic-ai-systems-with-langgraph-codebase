@@ -29,6 +29,16 @@ Some tests are skip-guarded behind environment variables when a chapter integrat
 external service (see the chapter-specific notes below as they're added). They skip cleanly
 without one - they are not required for the rest of the suite to pass.
 
+### Chapter-specific notes
+
+- **Chapter 9, Persistence and Checkpointing.** `atlas/graph.py`'s `graph` now compiles onto
+  `InMemorySaver` for tests/dev; `atlas/graph.py`'s `run_durable` compiles the same graph onto
+  `AsyncPostgresSaver` for production, needing the `langgraph-checkpoint-postgres` package with
+  psycopg's `binary` extra (`uv add "langgraph-checkpoint-postgres" "psycopg[binary,pool]"` -
+  already in this repo's `pyproject.toml`). Its test is skip-guarded behind
+  `ATLAS_POSTGRES_TEST_DSN`; set it to a reachable Postgres connection string (for example
+  `postgresql://atlas:atlas@localhost:5432/atlas`) to exercise it, otherwise it skips cleanly.
+
 ## Reading paths
 
 See the book's preface for the four reading paths (Atlas fast path, architecture path,

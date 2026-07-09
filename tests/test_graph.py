@@ -14,7 +14,14 @@ validated TriageResult instead of a raw string - `triage`/`triage_with_command`
 now read `.route` off that object. These tests monkeypatch `classify` with a
 small stand-in (`_decision`) that exposes the same `.route` attribute, so the
 routing-boundary behavior can still be exercised without a live model call.
-`KnowledgeBaseUnavailable` also moves, to atlas.tools."""
+`KnowledgeBaseUnavailable` also moves, to atlas.tools.
+
+Chapter 9, "Persistence and Checkpointing", compiles `graph` onto
+`InMemorySaver`, which makes `thread_id` required in `config["configurable"]`
+on every `invoke` call - the end-to-end tests below that call `graph.invoke`
+directly now pass a `config` with a per-test `thread_id` for exactly that
+reason (see tests/test_run.py for the checkpointer/thread_id behavior
+itself)."""
 
 import asyncio
 from types import SimpleNamespace
@@ -240,7 +247,10 @@ def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
         ),
     )
 
-    result = graph.invoke({"messages": [{"role": "user", "content": "refund?"}]})
+    config = {"configurable": {"thread_id": "test-thread-messages-accumulate"}}
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "refund?"}]}, config
+    )
 
     assert len(result["messages"]) == 2
     assert result["messages"][0].content == "refund?"
@@ -260,7 +270,8 @@ def test_a_query_that_keeps_coming_back_empty_retries_then_escalates_gracefully(
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
 
-    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
+    config = {"configurable": {"thread_id": "test-thread-retry-then-escalate"}}
+    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]}, config)
 
     assert result["retrieve_attempts"] == MAX_RETRIEVE_ATTEMPTS
     assert result["ticket"] == {"status": "escalated"}
@@ -277,7 +288,8 @@ def test_a_failing_knowledge_base_routes_to_escalate_instead_of_a_fake_answer(
     )
     monkeypatch.setattr(graph_module, "search_kb", _boom)
 
-    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
+    config = {"configurable": {"thread_id": "test-thread-kb-failure"}}
+    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]}, config)
 
     assert result["error"] == "knowledge base is down"
     assert result["ticket"] == {"status": "escalated"}
@@ -290,7 +302,8 @@ def test_an_off_menu_triage_route_escalates_without_ever_reaching_a_bad_node(
         graph_module, "classify", lambda messages: _decision("lookup_order")
     )
 
-    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]})
+    config = {"configurable": {"thread_id": "test-thread-off-menu-route"}}
+    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]}, config)
 
     assert result["route"] == "escalate"
     assert result["ticket"] == {"status": "escalated"}

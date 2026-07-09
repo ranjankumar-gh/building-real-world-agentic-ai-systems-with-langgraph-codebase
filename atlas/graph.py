@@ -41,11 +41,26 @@ not yet rewired to call it: that integration (folding a tool-calling agent
 into this graph) is deferred to a later chapter, so `retrieve`/`answer`
 still call the atlas.helpers stubs for `search_kb`/`compose_answer` shape
 continuity until then. See atlas/helpers.py's module docstring.
+
+Chapter 9, "Persistence and Checkpointing", compiles `graph` onto a
+checkpointer so state survives past a single `invoke` call. `InMemorySaver`
+is the dev/test backend - RAM only, gone on process restart, but it
+exercises the exact checkpointing code path with no external dependency.
+With a checkpointer attached, every `invoke`/`ainvoke` now requires a
+`thread_id` in `config["configurable"]` - see atlas/run.py for the
+thread-scoped call shape and `get_state` inspection. `run_durable` below is
+the production seam: the same graph, compiled for the lifetime of one call
+onto `AsyncPostgresSaver` instead, so checkpoints outlive the process. Select
+between them by environment behind one factory, per the chapter's "one seam
+for dev and prod" - the graph-building code itself never branches on which
+backend is live.
 """
 
 import asyncio
 from typing import Literal
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
@@ -154,4 +169,28 @@ builder.add_conditional_edges("retrieve", route_after_retrieve)  # the cycle + i
 builder.add_edge("answer", END)
 builder.add_edge("escalate", END)
 
-graph = builder.compile()
+# Chapter 9: compiled onto a checkpointer, so every superstep is saved. The
+# dev/test default - RAM-backed, gone on restart, but the right tool for
+# tests: it exercises the real checkpointing path with no external service.
+graph = builder.compile(checkpointer=InMemorySaver())
+
+DB_URI = "postgresql://atlas:atlas@localhost:5432/atlas"
+
+
+async def run_durable(message: str, config: dict, db_uri: str = DB_URI) -> AtlasState:
+    """The production seam from "Swap to a durable backend": compile this
+    same `builder` onto `AsyncPostgresSaver` instead of `InMemorySaver`, so
+    checkpoints outlive the process. The Postgres instance is a seeded local
+    service in the companion repo - see README.md for how to point `db_uri`
+    at it; no cloud account is needed.
+
+    `AsyncPostgresSaver.from_conn_string` is an async context manager, so the
+    compiled graph (and its checkpointer connection) only lives for the
+    duration of this call - a real deployment keeps that context open for
+    the life of the process instead of opening and closing it per call."""
+    async with AsyncPostgresSaver.from_conn_string(db_uri) as checkpointer:
+        durable_graph = builder.compile(checkpointer=checkpointer)
+        return await durable_graph.ainvoke(
+            {"messages": [{"role": "user", "content": message}]},
+            config,
+        )
