@@ -8,9 +8,23 @@ replaces classify and search_kb with real implementations against the seeded
 knowledge-base backend; compose_answer follows the same path. Do not implement
 business logic here before then - a chapter that fills in a stub says so
 explicitly.
+
+Chapter 6, "Conditional Edges and Dynamic Control Flow", adds
+`KnowledgeBaseUnavailable` - the KB tool's failure type. `atlas/graph.py`'s
+`retrieve` node catches it and records the failure in state instead of
+crashing the run or pretending the lookup worked. Chapter 7 moves this
+exception to live alongside the real `search_kb` implementation in
+atlas/tools.py, once that module exists.
 """
 
 from typing import Literal
+
+
+class KnowledgeBaseUnavailable(Exception):
+    """Raised by the knowledge-base tool when it cannot be reached at all -
+    distinct from a search that just came back empty. `search_kb` is still a
+    stub (see below) and never raises this itself yet; the seeded backend
+    that can raise it for real arrives with Chapter 7's atlas/tools.py."""
 
 
 def classify(messages: list) -> Literal["answer", "retrieve", "escalate"]:

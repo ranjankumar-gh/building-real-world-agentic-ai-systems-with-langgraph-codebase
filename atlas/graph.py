@@ -6,13 +6,25 @@ stays in the repo unchanged as the Chapter 3 node-SHAPE artifact (no
 StateGraph, no compile()); this is the transcription of that whiteboard into
 something `compile()` validates and the runtime actually runs.
 
-The topology here is deliberately linear: START -> triage -> retrieve ->
-answer -> END. Chapter 3's triage branch and escalate path exist as
-`route_after_triage` in graph_sketch.py but are not wired yet - Chapter 6
-turns the straight triage->retrieve edge into a conditional one. Chapter 5
-moved the state schema out to atlas/state.py and gave every channel its own
-deliberately chosen reducer - `AtlasState` is imported from there now, not
-defined inline.
+Chapter 5 moved the state schema out to atlas/state.py and gave every channel
+its own deliberately chosen reducer - `AtlasState` is imported from there now,
+not defined inline.
+
+Chapter 6, "Conditional Edges and Dynamic Control Flow", turns the linear
+START -> triage -> retrieve -> answer -> END chain into the Figure 3.1
+branching topology: `triage` validates the model's proposed route against
+`ALLOWED_ROUTES` (off-menu -> "escalate", the routing boundary from that
+chapter), `add_conditional_edges` replaces the fixed triage->retrieve and
+retrieve->answer edges, and a new `escalate` node gives the graph a graceful
+exit. `retrieve` is now a bounded retry cycle guarded by the explicit
+`retrieve_attempts` state counter - not by LangGraph's `recursion_limit` -
+and records a `KnowledgeBaseUnavailable` failure in state instead of crashing
+or answering on top of it. `triage_with_command` is the chapter's `Command`
+alternative: update state and route in one move. It is intentionally not
+wired into `builder` below, the same way Chapter 4's `retrieve_async` is
+defined but unused - the chapter's own guidance is to default to conditional
+edges and reach for `Command` only when the update and the route are
+genuinely one decision.
 
 The node bodies call the same stubs as graph_sketch.py (atlas.helpers:
 classify/search_kb/compose_answer), which raise NotImplementedError until
@@ -20,16 +32,38 @@ Chapter 7 fills them in for real.
 """
 
 import asyncio
+from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import RetryPolicy
+from langgraph.types import Command, RetryPolicy
 
-from atlas.helpers import classify, compose_answer, search_kb
+from atlas.helpers import KnowledgeBaseUnavailable, classify, compose_answer, search_kb
 from atlas.state import AtlasState
+
+ALLOWED_ROUTES = ("answer", "retrieve", "escalate")
+MAX_RETRIEVE_ATTEMPTS = 3
 
 
 def triage(state: AtlasState) -> dict:
-    return {"route": classify(state["messages"])}
+    proposed = classify(state["messages"])  # the model proposes
+    route = proposed if proposed in ALLOWED_ROUTES else "escalate"  # the graph disposes
+    return {"route": route}
+
+
+def triage_with_command(
+    state: AtlasState,
+) -> Command[Literal["answer", "retrieve", "escalate"]]:
+    """The `Command` alternative to `triage` + `route_from_triage`: update
+    state and name the next node in one move, for when the two are genuinely
+    the same decision. Not wired into `builder` - `triage` above stays the
+    default, since it keeps routing visible on a separate edge."""
+    proposed = classify(state["messages"])
+    route = proposed if proposed in ALLOWED_ROUTES else "escalate"
+    return Command(update={"route": route}, goto=route)
+
+
+def route_from_triage(state: AtlasState) -> Literal["answer", "retrieve", "escalate"]:
+    return state["route"]
 
 
 def retrieve(state: AtlasState) -> dict:
@@ -39,8 +73,18 @@ def retrieve(state: AtlasState) -> dict:
     the event loop. See "Making it correct under load" - marking this
     `async def` while still calling `search_kb` directly is the mistake
     behind the chapter's opening incident (every concurrent run stalls
-    behind one blocking request)."""
-    return {"retrieved": search_kb(state["messages"])}
+    behind one blocking request).
+
+    Chapter 6 adds the bounded-retry counter and the failure path: a
+    `KnowledgeBaseUnavailable` is caught and recorded in `error` rather than
+    left to crash the run, and every successful call increments
+    `retrieve_attempts` so `route_after_retrieve` can cap the retry loop."""
+    try:
+        hits = search_kb(state["messages"])
+    except KnowledgeBaseUnavailable as exc:
+        return {"error": str(exc)}  # record the failure - do not pretend it worked
+    attempts = state.get("retrieve_attempts", 0) + 1
+    return {"retrieved": hits, "retrieve_attempts": attempts}
 
 
 async def retrieve_async(state: AtlasState) -> dict:
@@ -53,9 +97,28 @@ async def retrieve_async(state: AtlasState) -> dict:
     return {"retrieved": hits}
 
 
+def route_after_retrieve(
+    state: AtlasState,
+) -> Literal["answer", "retrieve", "escalate"]:
+    if state.get("error"):
+        return "escalate"  # tool failure -> human, not a fake answer
+    if state["retrieved"]:
+        return "answer"  # got results -> answer
+    if state["retrieve_attempts"] >= MAX_RETRIEVE_ATTEMPTS:
+        return "escalate"  # gave up -> human, gracefully
+    return "retrieve"  # bounded retry
+
+
 def answer(state: AtlasState) -> dict:
     reply = compose_answer(state["messages"], state["retrieved"])
     return {"messages": [reply]}
+
+
+def escalate(state: AtlasState) -> dict:
+    """The graceful exit the retry loop and the model's off-menu routes both
+    fall back to. Same shape as the Chapter 3 whiteboard's escalate node
+    (atlas/graph_sketch.py) - Chapter 6 is what finally wires it in."""
+    return {"ticket": {"status": "escalated"}}
 
 
 builder = StateGraph(AtlasState)
@@ -69,10 +132,12 @@ builder.add_node(
     retry_policy=RetryPolicy(max_attempts=3, retry_on=(ConnectionError,)),
 )
 builder.add_node("answer", answer)
+builder.add_node("escalate", escalate)
 
 builder.add_edge(START, "triage")
-builder.add_edge("triage", "retrieve")
-builder.add_edge("retrieve", "answer")
+builder.add_conditional_edges("triage", route_from_triage)  # the branch
+builder.add_conditional_edges("retrieve", route_after_retrieve)  # the cycle + its exit
 builder.add_edge("answer", END)
+builder.add_edge("escalate", END)
 
 graph = builder.compile()

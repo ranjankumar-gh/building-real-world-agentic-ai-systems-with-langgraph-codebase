@@ -63,6 +63,13 @@ def test_atlas_state_ticket_and_route_have_no_reducer_annotation():
     assert get_origin(AtlasState.__annotations__["route"]) is not Annotated
 
 
+def test_atlas_state_retrieve_attempts_and_error_have_no_reducer_annotation():
+    """Chapter 6's loop-guard counter and recovery flag are also LastValue -
+    only atlas/graph.py's retrieve node ever writes either one."""
+    assert get_origin(AtlasState.__annotations__["retrieve_attempts"]) is not Annotated
+    assert get_origin(AtlasState.__annotations__["error"]) is not Annotated
+
+
 def test_retrieved_channel_merges_parallel_fan_out_without_duplicates():
     """Reproduces the hook's incident directly on AtlasState: three sources
     fan out from START in the same superstep and write `retrieved`. Because

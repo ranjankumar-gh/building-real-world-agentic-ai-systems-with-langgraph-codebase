@@ -8,6 +8,13 @@ See "Designing AtlasState". Every channel here states its own merge rule:
 `InvalidUpdateError` (see atlas/clobber_demo.py) if that contract is ever
 violated. atlas/graph.py now imports `AtlasState` from here; Chapter 4's
 inline, partially-annotated TypedDict is retired.
+
+Chapter 6, "Conditional Edges and Dynamic Control Flow", adds two more
+LastValue channels for the bounded retrieval retry and its recovery path:
+`retrieve_attempts` (the explicit loop guard `route_after_retrieve` checks
+instead of leaning on the recursion limit) and `error` (set only when
+`retrieve` catches a `KnowledgeBaseUnavailable` failure, read with
+`state.get("error")` since it is not written on every path).
 """
 
 from typing import Annotated, TypedDict
@@ -42,3 +49,5 @@ class AtlasState(TypedDict):
     retrieved: Annotated[list[Doc], dedup_by_id]  # many writers, merged
     ticket: dict | None  # one writer per step, guarded (LastValue)
     route: str  # one writer per step, guarded (LastValue)
+    retrieve_attempts: int  # the explicit loop guard; LastValue (only retrieve writes it)
+    error: str | None  # recorded tool failure; LastValue (only retrieve writes it)
