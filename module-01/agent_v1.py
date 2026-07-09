@@ -3,10 +3,10 @@ import ollama
 import json
 import requests
 import os
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 
 # Define available tools
 def calculator(operation: str, x: float, y: float) -> float:
@@ -22,13 +22,16 @@ def calculator(operation: str, x: float, y: float) -> float:
 def get_weather(city: str) -> dict:
     """Get current weather for a city."""
     # Get API key and URL from environment variables
-    api_key = os.getenv("WEATHER_API_KEY")
-    weather_api_url = os.getenv("WEATHER_API_URL", "http://localhost:8000/data/2.5/weather")
+    #api_key = os.getenv("WEATHER_API_KEY")
+    WEATHER_API_KEY="test_api_key_12345"
 
-    if not api_key:
+    #weather_api_url = os.getenv("WEATHER_API_URL", "http://localhost:8000/data/2.5/weather")
+    WEATHER_API_URL="http://localhost:8000/data/2.5/weather"
+
+    if not WEATHER_API_KEY:
         return {"error": "Weather API key not found. Please set WEATHER_API_KEY in .env file"}
 
-    url = f"{weather_api_url}?q={city}&appid={api_key}"
+    url = f"{WEATHER_API_URL}?q={city}&appid={WEATHER_API_KEY}"
 
     try:
         response = requests.get(url)
@@ -121,18 +124,30 @@ def agent_with_tools(user_message: str) -> str:
         {"role": "user", "content": user_message}
     ]
 
+    # First call to the LLM with tools
+    print("=== Initial LLM Call with Tools ===")
+    print(f"messages: {messages}")
+    print(f"tools: {tools}")
+
     # Initial LLM call with tools
     response = ollama.chat(
-        model="qwen3:8b",
+        model="qwen2.5:3b",
         messages=messages,
         tools=tools
     )
 
+    print("=== LLM Response ===")
+    print(response)
+
     # Add assistant's response to messages
     messages.append(response['message'])
+    print("=== Updated Messages ===")
+    print(messages)
 
     # Check if the model wants to use a tool
+    print("=== Checking for Tool Calls ===")
     if response['message'].get('tool_calls'):
+        print("Model wants to use tools:", response['message']['tool_calls'])
         for tool_call in response['message']['tool_calls']:
             function_name = tool_call['function']['name']
             function_args = tool_call['function']['arguments']
@@ -147,13 +162,19 @@ def agent_with_tools(user_message: str) -> str:
                 "content": json.dumps(function_response) if not isinstance(function_response, str) else function_response
             })
 
+            print("=== Updated Messages after tool ===")
+            print(messages)
+
         # Get final response from the model
         final_response = ollama.chat(
-            model="qwen3:8b",
+            model="qwen2.5:3b",
             messages=messages
         )
+        print("=== Final LLM Response ===")
+        print(final_response)
         return final_response['message']['content']
-
+    else:
+        print("Model did not use any tools.")
     return response['message']['content']
 
 # Test the agent

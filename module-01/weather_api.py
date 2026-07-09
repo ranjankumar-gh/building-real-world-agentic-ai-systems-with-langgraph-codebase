@@ -5,17 +5,18 @@ Provides mock weather data for local development and testing
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 import os
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 import random
 from typing import Optional
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 
 app = FastAPI(title="Local Weather API", version="1.0.0")
 
 # Get API key from environment
-VALID_API_KEY = os.getenv("WEATHER_API_KEY", "test_api_key_12345")
+#VALID_API_KEY = os.getenv("WEATHER_API_KEY", "test_api_key_12345")
+VALID_API_KEY="test_api_key_12345"
 
 # Mock weather data for different cities
 MOCK_WEATHER_DATA = {
