@@ -83,7 +83,20 @@ that same call. Approve and a re-validated edit route onward to `refund`
 via `Command(goto=...)`; reject routes to `escalate`. Because a resumed node
 re-runs from the top (see the chapter's "gotcha" callout), `approval_gate`
 does nothing but interrupt and route - no side effect lives here, the same
-membrane discipline Chapter 10 established for `refund` itself."""
+membrane discipline Chapter 10 established for `refund` itself.
+
+Chapter 13, "Short-Term vs Long-Term Memory", adds `remember` and `recall` -
+the node-facing side of the cross-thread store (`atlas/memory.py` holds the
+store's own shape: `profile_ns`, `relevant_memories`, the dev/prod backend
+swap). Both reach the store through `runtime.store`, the same `Runtime`
+handle every node and middleware already receives - `remember` persists a
+durable customer fact that outlives the thread; `recall` reads it back at
+the start of a fresh one. Like `retrieve_async` and `triage_with_command`
+before them, they are defined and unit-tested here but not wired into
+`builder` below: the chapter's point is the mechanism itself (checkpointer
+vs. store, thread-scoped vs. namespace-scoped), not a specific place in
+Atlas's routing topology to call it - that integration is left to
+Chapter 14, once extraction decides *what* is worth remembering."""
 
 import asyncio
 from typing import Literal
@@ -93,10 +106,12 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 from langgraph.types import Command, RetryPolicy, TimeoutPolicy, interrupt
 
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
+from atlas.memory import profile_ns
 from atlas.state import AtlasState
 from atlas.tools import KnowledgeBaseUnavailable
 from atlas.triage import classify
@@ -259,6 +274,26 @@ def refund_failed(state: AtlasState) -> Command:
         update={"error": "refund failed after retries; needs manual review"},
         goto="escalate",
     )
+
+
+def remember(state: AtlasState, runtime: Runtime) -> dict:
+    """Chapter 13: persist a durable fact about the customer - crosses no
+    membrane, but outlives the thread. Not wired into `builder` below (see
+    the module docstring's Chapter 13 paragraph) - unit-tested directly in
+    tests/test_graph.py against a `Runtime` built on `InMemoryStore`."""
+    cid = state["ticket"]["customer_id"]
+    runtime.store.put(profile_ns(cid), "plan", {"tier": "enterprise"})
+    return {}
+
+
+def recall(state: AtlasState, runtime: Runtime) -> dict:
+    """Chapter 13: load the customer's profile into state at the start of a
+    thread, so a returning customer is not a stranger. See `remember`
+    above."""
+    cid = state["ticket"]["customer_id"]
+    item = runtime.store.get(profile_ns(cid), "plan")
+    plan = item.value["tier"] if item else "unknown"
+    return {"customer_plan": plan}
 
 
 builder = StateGraph(AtlasState)

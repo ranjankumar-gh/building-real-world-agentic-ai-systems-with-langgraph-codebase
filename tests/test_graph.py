@@ -48,6 +48,8 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
+from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
 from atlas import graph as graph_module
@@ -61,9 +63,11 @@ from atlas.graph import (
     approval_gate,
     escalate,
     graph,
+    recall,
     refund,
     refund_already_done,
     refund_failed,
+    remember,
     retrieve,
     retrieve_async,
     route_after_retrieve,
@@ -71,6 +75,7 @@ from atlas.graph import (
     triage,
     triage_with_command,
 )
+from atlas.memory import profile_ns
 from atlas.tools import KnowledgeBaseUnavailable
 
 
@@ -246,6 +251,55 @@ def test_retrieve_async_offloads_the_blocking_call_via_asyncio_to_thread(monkeyp
     delta = asyncio.run(retrieve_async(_state(messages=["hi"])))
 
     assert delta == {"retrieved": ["hit-1"]}
+
+
+def test_remember_persists_a_durable_customer_fact_to_the_store():
+    """Chapter 13: `remember` writes through `runtime.store`, not through
+    the checkpointer - it reaches the store the same way every node does."""
+    store = InMemoryStore()
+    runtime = Runtime(store=store)
+    state = _state(ticket={"id": "T-1001", "customer_id": "cust-1"})
+
+    delta = remember(state, runtime)
+
+    assert delta == {}  # no state channel changes - the store, not state, holds the fact
+    item = store.get(profile_ns("cust-1"), "plan")
+    assert item.value == {"tier": "enterprise"}
+
+
+def test_recall_reads_a_previously_remembered_fact_on_a_fresh_thread():
+    """Exercise 1: write in one thread, read back on what is logically a new
+    one - `recall` never touches thread_id, only the customer's namespace."""
+    store = InMemoryStore()
+    runtime = Runtime(store=store)
+    state = _state(ticket={"id": "T-1001", "customer_id": "cust-1"})
+    remember(state, runtime)
+
+    delta = recall(state, runtime)
+
+    assert delta == {"customer_plan": "enterprise"}
+
+
+def test_recall_returns_unknown_when_the_store_has_never_seen_this_customer():
+    store = InMemoryStore()
+    runtime = Runtime(store=store)
+    state = _state(ticket={"id": "T-2002", "customer_id": "cust-never-seen"})
+
+    delta = recall(state, runtime)
+
+    assert delta == {"customer_plan": "unknown"}
+
+
+def test_recall_never_returns_a_different_customers_memory():
+    """Exercise 2's isolation claim, from the node side: two customers'
+    facts never cross, because the namespace is keyed by customer_id."""
+    store = InMemoryStore()
+    runtime = Runtime(store=store)
+    remember(_state(ticket={"id": "T-1", "customer_id": "cust-a"}), runtime)
+
+    delta = recall(_state(ticket={"id": "T-2", "customer_id": "cust-b"}), runtime)
+
+    assert delta == {"customer_plan": "unknown"}  # cust-b has no memory of its own
 
 
 def test_graph_compiles_with_the_figure_3_1_branching_topology():
