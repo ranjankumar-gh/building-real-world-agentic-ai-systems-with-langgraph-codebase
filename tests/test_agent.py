@@ -1,5 +1,7 @@
 """Chapter 7, "Tools, Models, MCP, and create_agent" - atlas/agent.py.
 Chapter 8, "The Middleware System", adds coverage for the middleware= wiring.
+Chapter 12, "Context Engineering", adds coverage for the context_budget
+middleware folded into the same stack.
 
 See "Binding the model" and "Reaching external tools with MCP". Building
 `create_agent` (and `init_chat_model`) does not require a live API key -
@@ -21,8 +23,10 @@ from atlas.agent import (
     RESOLVE_TOOLS,
     build_resolve_agent,
     build_resolve_agent_from_model_id,
+    context_budget,
     resolve_agent,
 )
+from atlas.context import ContextBudget
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
 from atlas.tools import lookup_ticket, search_kb, set_ticket_status
 
@@ -56,6 +60,21 @@ def test_resolve_agent_wires_chapter_8s_middleware_stack():
     assert "PIIMiddleware[email].after_model" in node_names
     assert "SummarizationMiddleware.before_model" in node_names
     assert "HumanInTheLoopMiddleware.after_model" in node_names
+
+
+def test_resolve_agent_carries_the_chapter_12_context_budget():
+    """`context_budget`'s wrap_model_call adds no extra graph node (unlike
+    the before_model/after_model hooks Chapter 8 checks above) - it wraps
+    the existing model-call step in place - so this checks the middleware
+    instance and its configured slices directly, the same way
+    `tests/test_middleware.py` checks `AuthorityGate.wrap_tool_call`."""
+    assert isinstance(context_budget, ContextBudget)
+    assert context_budget.budget.history == 4000
+    assert context_budget.budget.retrieved == 2000
+
+
+def test_resolve_agent_still_compiles_with_the_context_budget_added():
+    assert hasattr(resolve_agent, "invoke")
 
 
 def test_build_resolve_agent_from_model_id_accepts_a_bare_string_id():

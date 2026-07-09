@@ -22,6 +22,13 @@ before this chapter has no such key, and subscript access on it would raise
 when that old checkpoint resumes. Read it with `state.get("refund_done",
 False)`, never `state["refund_done"]`, so pre-Chapter-10 checkpoints keep
 resuming safely (see "State migration without downtime").
+
+Chapter 12, "Context Engineering", adds `Doc.score` - also additive, same
+migration discipline: existing docs that only carry `id`/`text` still
+type-check as far as runtime dict access goes, and every caller that reads
+just those two fields is unaffected. `atlas/context.py`'s `select_docs` is
+the first reader of `score` - it ranks retrieved documents and caps them to
+the retrieved slice of the context budget.
 """
 
 from typing import Annotated, TypedDict
@@ -33,6 +40,7 @@ from langgraph.graph.message import add_messages
 class Doc(TypedDict):
     id: str
     text: str
+    score: float
 
 
 def dedup_by_id(current: list[Doc], update: list[Doc]) -> list[Doc]:
