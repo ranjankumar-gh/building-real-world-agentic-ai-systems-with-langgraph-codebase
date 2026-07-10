@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "resolve": "./atlas/graph.py:graph",
+    "research": "./atlas/research.py:research_graph"
+  },
+  "env": ".env",
+  "python_version": "3.12"
+}

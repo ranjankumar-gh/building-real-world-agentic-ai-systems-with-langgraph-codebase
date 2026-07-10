@@ -1,0 +1,12 @@
+# docker-compose.override.yml - scale the API service, share the database
+# Chapter 22, "Deployment and Scaling": layered on top of the docker-compose.yml
+# that `langgraph up` generates, via `docker compose -f docker-compose.yml -f
+# docker-compose.override.yml up`. See "Horizontal scaling: N replicas, one
+# Postgres, one pooler".
+services:
+  langgraph-api:
+    deploy:
+      replicas: 3
+  postgres:
+    deploy:
+      replicas: 1 # Postgres is NOT replicated the same way - see the chapter's note <1>
