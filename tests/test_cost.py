@@ -1,0 +1,101 @@
+"""Chapter 23, "Security, Privacy, Cost, and Governance" - atlas/cost.py.
+
+See "A hard, cumulative cost ceiling". `TenantBudgetGuard.wrap_model_call`
+needs no live model call to test - it only reads/writes the cumulative
+token count in a `BaseStore` and decides whether to call `handler` at all,
+so an `InMemoryStore` (the same dev/test default `atlas/memory.py` already
+uses) plus a dummy `ModelRequest` (the `test_context.py` convention) is
+enough to exercise it directly."""
+
+from langchain.agents.middleware import ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.runtime import Runtime
+from langgraph.store.memory import InMemoryStore
+
+from atlas.cost import MONTHLY_TOKEN_CAP, TenantBudgetGuard, budget_ns, degrade
+from atlas.security import AtlasContext
+
+
+def _request(customer_id: str, messages: list) -> ModelRequest:
+    return ModelRequest(
+        model=object(),  # stand-in for BaseChatModel; never invoked once over cap
+        messages=messages,
+        system_message=SystemMessage("You are Atlas."),
+        runtime=Runtime(context=AtlasContext(role="support_agent", customer_id=customer_id)),
+    )
+
+
+def test_budget_ns_scopes_by_customer():
+    assert budget_ns("C-1") == ("customer", "C-1", "budget")
+    assert budget_ns("C-1") != budget_ns("C-2")
+
+
+def test_degrade_returns_a_model_response_without_calling_the_model():
+    result = degrade(_request("C-1", [HumanMessage("hi")]))
+
+    assert isinstance(result, ModelResponse)
+    assert isinstance(result.result[0], AIMessage)
+    assert "monthly usage allocation" in result.result[0].content
+
+
+def test_guard_lets_a_fresh_tenant_through_and_records_spend():
+    store = InMemoryStore()
+    guard = TenantBudgetGuard(store)
+    request = _request("C-1", [HumanMessage("what is the refund window")])
+
+    result = guard.wrap_model_call(request, lambda r: "handled")
+
+    assert result == "handled"
+    item = store.get(budget_ns("C-1"), "monthly_tokens")
+    assert item.value["tokens"] > 0
+
+
+def test_guard_accumulates_spend_across_multiple_calls():
+    store = InMemoryStore()
+    guard = TenantBudgetGuard(store)
+
+    for _ in range(3):
+        guard.wrap_model_call(
+            _request("C-1", [HumanMessage("what is the refund window")]), lambda r: "handled"
+        )
+
+    item = store.get(budget_ns("C-1"), "monthly_tokens")
+    assert item.value["tokens"] > 0
+    # three calls costs strictly more than one
+    single_store = InMemoryStore()
+    TenantBudgetGuard(single_store).wrap_model_call(
+        _request("C-1", [HumanMessage("what is the refund window")]), lambda r: "handled"
+    )
+    single = single_store.get(budget_ns("C-1"), "monthly_tokens").value["tokens"]
+    assert item.value["tokens"] == single * 3
+
+
+def test_guard_degrades_once_the_cumulative_cap_is_hit_without_calling_the_model():
+    store = InMemoryStore()
+    store.put(budget_ns("C-1"), "monthly_tokens", {"tokens": MONTHLY_TOKEN_CAP})
+    guard = TenantBudgetGuard(store)
+    called = []
+
+    def handler(_request):
+        called.append(True)
+        return "should not run"
+
+    result = guard.wrap_model_call(
+        _request("C-1", [HumanMessage("one more question")]), handler
+    )
+
+    assert isinstance(result, ModelResponse)
+    assert called == []  # the model was never called once over the cap
+
+
+def test_guard_keeps_tenants_isolated_in_separate_namespaces():
+    store = InMemoryStore()
+    guard = TenantBudgetGuard(store)
+    store.put(budget_ns("C-over"), "monthly_tokens", {"tokens": MONTHLY_TOKEN_CAP})
+
+    # C-fresh has never spent anything, so it must sail through even though
+    # C-over is capped in the same store.
+    result = guard.wrap_model_call(
+        _request("C-fresh", [HumanMessage("hello")]), lambda r: "handled"
+    )
+    assert result == "handled"
