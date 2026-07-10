@@ -9,7 +9,12 @@ connection - they are tested for real below. `answer_quality` (via
 connection - both are skip-guarded, matching the `requires_postgres`/
 `requires_openai`/`requires_anthropic`/`requires_langsmith` pattern already
 used throughout this repo (see `tests/test_tracing.py`, `tests/test_memory.py`,
-`tests/test_run_research.py`) for the external-service exception."""
+`tests/test_run_research.py`) for the external-service exception.
+
+Chapter 27, "Capstone", adds `checkins_sent_only_if_approved` and
+`run_sla_watch` - both deterministic, no live connection needed, exercised
+for real below via a genuine suspend/resume cycle through
+`atlas.sla_watch.build_sla_watch_graph()`."""
 
 import os
 
@@ -21,10 +26,12 @@ from atlas.evals import (
     REGRESSION_EXAMPLES,
     answer_quality,
     build_regression_dataset,
+    checkins_sent_only_if_approved,
     handoffs_within_bound,
     routing_correct,
     run_atlas,
     run_regression_suite,
+    run_sla_watch,
     tool_call_correct,
 )
 
@@ -45,10 +52,21 @@ def test_regression_examples_cover_one_example_per_known_route():
     """Path coverage, not question variety: one example per Chapter 6/11/16
     route, not many differently-worded questions on the same route."""
     routes = {ex["outputs"].get("route") for ex in REGRESSION_EXAMPLES}
-    assert routes == {"answer", "retrieve", "refund", None}  # None: the research example
+    assert routes == {"answer", "retrieve", "refund", None}  # None: research + sla_watch
 
     targets = {ex["inputs"]["target"] for ex in REGRESSION_EXAMPLES}
-    assert targets == {"resolve", "research"}
+    assert targets == {"resolve", "research", "sla_watch"}
+
+
+def test_regression_examples_cover_both_sla_watch_paths():
+    """Chapter 27: one example per SLA Watch path - approve sends, reject
+    doesn't - the same path-coverage logic as every other route."""
+    sla_examples = [ex for ex in REGRESSION_EXAMPLES if ex["inputs"]["target"] == "sla_watch"]
+    decisions = {ex["inputs"]["decision"] for ex in sla_examples}
+    assert decisions == {"approve", "reject"}
+    sent = {ex["inputs"]["decision"]: ex["outputs"]["sla_watch_sent"] for ex in sla_examples}
+    assert sent["approve"] == ["T-2001"]
+    assert sent["reject"] == []
 
 
 def test_only_the_refund_example_carries_a_tool_call_trajectory_reference():
@@ -146,10 +164,54 @@ def test_answer_quality_is_constructed_locally_and_is_callable():
     assert callable(answer_quality)
 
 
-def test_all_evaluators_lists_all_four_evaluators_in_the_documented_order():
+def test_all_evaluators_lists_all_five_evaluators_in_the_documented_order():
     assert ALL_EVALUATORS == [
-        routing_correct, handoffs_within_bound, tool_call_correct, answer_quality
+        routing_correct,
+        handoffs_within_bound,
+        tool_call_correct,
+        answer_quality,
+        checkins_sent_only_if_approved,
     ]
+
+
+# --- Chapter 27: checkins_sent_only_if_approved -----------------------------
+
+
+def test_checkins_sent_only_if_approved_is_a_no_op_when_no_reference_exists():
+    assert checkins_sent_only_if_approved({"route": "answer"}, {"route": "answer"}) is True
+
+
+def test_checkins_sent_only_if_approved_passes_when_the_approved_ticket_sent():
+    assert checkins_sent_only_if_approved(
+        {"sla_watch_sent": ["T-2001"]}, {"sla_watch_sent": ["T-2001"]}
+    ) is True
+
+
+def test_checkins_sent_only_if_approved_fails_when_a_rejected_draft_still_sent():
+    assert checkins_sent_only_if_approved(
+        {"sla_watch_sent": ["T-2001"]}, {"sla_watch_sent": []}
+    ) is False
+
+
+# --- Chapter 27: run_sla_watch, driven through a real interrupt/resume -----
+
+
+def test_run_sla_watch_sends_the_check_in_when_approved():
+    result = run_sla_watch({"target": "sla_watch", "decision": "approve"})
+    assert result == {"sla_watch_sent": ["T-2001"]}
+
+
+def test_run_sla_watch_sends_nothing_when_rejected():
+    result = run_sla_watch({"target": "sla_watch", "decision": "reject"})
+    assert result == {"sla_watch_sent": []}
+
+
+def test_run_atlas_dispatches_sla_watch_targets_without_a_message_field():
+    """SLA Watch runs on a schedule, not a customer turn - its dataset
+    examples carry no `message` key, so run_atlas must branch to
+    run_sla_watch BEFORE it ever reads inputs["message"]."""
+    result = run_atlas({"target": "sla_watch", "decision": "approve"})
+    assert result == {"sla_watch_sent": ["T-2001"]}
 
 
 # --- run_atlas: dispatch, not the graphs' own correctness -------------------

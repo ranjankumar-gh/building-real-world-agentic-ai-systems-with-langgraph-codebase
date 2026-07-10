@@ -15,7 +15,11 @@ import os
 import pytest
 
 from atlas.deploy import schedule as schedule_module
-from atlas.deploy.schedule import notify_on_research_complete, schedule_quality_monitor
+from atlas.deploy.schedule import (
+    notify_on_research_complete,
+    schedule_quality_monitor,
+    schedule_sla_watch,
+)
 
 requires_live_agent_server = pytest.mark.skipif(
     not os.environ.get("ATLAS_AGENT_SERVER_URL"),
@@ -112,6 +116,35 @@ def test_notify_on_research_complete_targets_the_research_assistant_with_a_webho
             "webhook": "https://internal.atlas.example.com/hooks/research-complete",
         }
     ]
+
+
+def test_schedule_sla_watch_targets_the_sla_watch_assistant_hourly(monkeypatch):
+    fake = _FakeClient("http://localhost:8123")
+    monkeypatch.setattr(schedule_module, "get_client", lambda url: fake)
+
+    result = asyncio.run(schedule_sla_watch())
+
+    assert result == {"cron_id": "cron-1"}
+    assert fake.crons.calls == [
+        {"assistant_id": "sla-watch", "schedule": "0 * * * *", "input": {}}
+    ]
+
+
+def test_schedule_sla_watch_uses_the_given_url_and_schedule(monkeypatch):
+    seen_urls = []
+    fake = _FakeClient("http://example.internal:8123")
+    monkeypatch.setattr(
+        schedule_module,
+        "get_client",
+        lambda url: seen_urls.append(url) or fake,
+    )
+
+    asyncio.run(
+        schedule_sla_watch(url="http://example.internal:8123", schedule="0 */2 * * *")
+    )
+
+    assert seen_urls == ["http://example.internal:8123"]
+    assert fake.crons.calls[0]["schedule"] == "0 */2 * * *"
 
 
 # --- External-service exception: a live Agent Server -----------------------

@@ -23,7 +23,13 @@ Chapter 16, "The Supervisor Pattern (and Swarm as Contrast)", adds
 `web_search_tool` - a second seeded, mockable lookup alongside `search_kb`,
 for the `web_research` specialist in `atlas/research.py`. Same shape as
 `search_kb`: a small in-repo dict standing in for a live web-search API, so
-the specialist's tool call runs fully offline in tests."""
+the specialist's tool call runs fully offline in tests.
+
+Chapter 27, "Capstone", adds `list_at_risk_tickets`/`send_checkin` for the
+SLA Watch vertical (`atlas/sla_watch.py`) - narrow by the same Chapter 7
+discipline: one reads, one writes exactly one thing. Their seeded backend,
+`_SLA_TICKETS`, is deliberately a separate object from `_TICKETS` above -
+it tracks ticket age, not status."""
 
 from typing import Literal
 
@@ -96,6 +102,50 @@ def web_search_tool(query: str) -> str:
         if key in query.lower():
             return snippet
     return "No web result matched."
+
+
+# Chapter 27, "Capstone" - the seeded backend for SLA Watch's two new
+# tools below. Deliberately a DIFFERENT object from `_TICKETS` above
+# (Chapter 7): that dict tracks status/priority/notes, keyed for
+# lookup_ticket/set_ticket_status; this one tracks ticket AGE, the fact
+# SLA Watch actually needs. Giving both the same name would have this
+# definition silently clobber Chapter 7's `_TICKETS` on import.
+class _SLATicketBackend:
+    """Seeded, mockable backend standing in for a live ticket-age query and
+    send API (Appendix A)."""
+
+    def __init__(self, tickets: list[dict]) -> None:
+        self._tickets = tickets
+        self.sent: list[dict] = []  # test-visible record of what actually sent
+
+    def at_risk(self, threshold_hours: int) -> list[dict]:
+        return [t for t in self._tickets if t["hours_open"] >= threshold_hours]
+
+    def send_message(self, ticket_id: str, message: str) -> str:
+        self.sent.append({"ticket_id": ticket_id, "message": message})
+        return f"check-in sent for {ticket_id}"
+
+
+_SLA_TICKETS = _SLATicketBackend(
+    [
+        {"ticket_id": "T-2001", "hours_open": 30},  # past the 24h threshold
+        {"ticket_id": "T-2002", "hours_open": 10},  # not yet at risk
+    ]
+)
+
+
+@tool
+def list_at_risk_tickets(threshold_hours: int) -> list[dict]:
+    """List open tickets that have been unresolved longer than threshold_hours."""
+    return _SLA_TICKETS.at_risk(threshold_hours)   # seeded backend, Appendix A
+
+
+@tool
+def send_checkin(ticket_id: str, message: str) -> str:
+    """Send a check-in message to the customer on one ticket. Narrow by
+    design: this tool can send exactly one thing, to one ticket, nothing
+    else - the same authority-surface discipline as set_ticket_status."""
+    return _SLA_TICKETS.send_message(ticket_id, message)
 
 
 def text_of(message) -> str:

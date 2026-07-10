@@ -38,13 +38,25 @@ example: it dispatches to whichever of Atlas's two graphs the example's
 `target` field names. `graph` is checkpointer-backed (Chapter 9) - a fresh
 `thread_id` per call keeps one example's state (or a suspended
 `approval_gate` interrupt from the refund example) from leaking into the
-next one."""
+next one.
+
+Chapter 27, "Capstone", adds `checkins_sent_only_if_approved` - SLA Watch's
+own deterministic evaluator, following the same no-op-if-not-applicable
+shape as `routing_correct`/`handoffs_within_bound` - plus two new examples
+(`target: "sla_watch"`) in the SAME frozen `atlas-regression` dataset, not a
+parallel suite. `run_sla_watch` is `run_atlas`'s dispatch target for those
+two examples: it drives `atlas/sla_watch.py`'s `build_sla_watch_graph()`
+through a REAL suspend-at-`approval_gate`/resume-with-`Command(resume=...)`
+cycle - the example's own `decision` field becomes every draft's decision -
+and reports which ticket ids actually got a `send_checkin` call, the exact
+field `checkins_sent_only_if_approved` checks against the reference."""
 
 from __future__ import annotations
 
 import uuid
 
 from agentevals.trajectory.match import create_trajectory_match_evaluator
+from langgraph.types import Command
 from langsmith import Client
 from langsmith.evaluation import evaluate
 from openevals.llm import create_llm_as_judge
@@ -52,6 +64,7 @@ from openevals.prompts import CORRECTNESS_PROMPT
 
 from atlas.graph import graph
 from atlas.research import research_graph
+from atlas.sla_watch import build_sla_watch_graph
 
 REGRESSION_DATASET = "atlas-regression"
 
@@ -90,6 +103,16 @@ REGRESSION_EXAMPLES = [
             "target": "research",
         },
         "outputs": {"max_handoffs": 2},
+    },
+    # Chapter 27: SLA Watch's two paths - approve sends, reject doesn't. No
+    # "message" field - SLA Watch runs on a schedule, not a customer turn.
+    {
+        "inputs": {"target": "sla_watch", "decision": "approve"},
+        "outputs": {"sla_watch_sent": ["T-2001"]},
+    },
+    {
+        "inputs": {"target": "sla_watch", "decision": "reject"},
+        "outputs": {"sla_watch_sent": []},
     },
 ]
 
@@ -158,12 +181,47 @@ answer_quality = create_llm_as_judge(
 )
 
 
+def checkins_sent_only_if_approved(outputs: dict, reference_outputs: dict) -> bool:
+    """Chapter 27: SLA Watch's own deterministic check: send_checkin must
+    never fire for a rejected draft. A no-op on every other route's
+    examples, the same no-op-if-not-applicable shape as `routing_correct`/
+    `handoffs_within_bound` above."""
+    if "sla_watch_sent" not in reference_outputs:
+        return True
+    return outputs.get("sla_watch_sent", []) == reference_outputs["sla_watch_sent"]
+
+
+def run_sla_watch(inputs: dict) -> dict:
+    """Chapter 27: drive one SLA Watch dataset example through a REAL
+    suspend-at-`approval_gate`/resume-with-`Command(resume=...)` cycle -
+    every drafted check-in gets the example's own `decision` - and report
+    which ticket ids actually received a `send_checkin` call, the field
+    `checkins_sent_only_if_approved` checks. A fresh graph (fresh
+    checkpointer AND fresh store) per call, the same example-isolation
+    discipline `run_atlas`'s fresh `thread_id` already applies below."""
+    config = {"configurable": {"thread_id": f"eval-{uuid.uuid4()}"}}
+    watch_graph = build_sla_watch_graph()
+    watch_graph.invoke({}, config)  # suspends at approval_gate
+    n_drafts = len(watch_graph.get_state(config).values.get("drafts", []))
+    decisions = [{"type": inputs["decision"]}] * n_drafts
+    result = watch_graph.invoke(Command(resume=decisions), config)
+    sent = [
+        draft["ticket_id"]
+        for draft, decision in zip(result["drafts"], result["decisions"])
+        if decision["type"] != "reject"
+    ]
+    return {"sla_watch_sent": sent}
+
+
 def run_atlas(inputs: dict) -> dict:
     """The CI-facing target: dispatch to the graph this example targets,
-    since Atlas is two graphs, not one (Chapter 15's multi-agent boundary).
-    invoke() already returns the full final state for whichever graph ran -
-    route and messages from the main graph, handoffs and messages from the
-    research graph - no separate get_state() call needed for a fresh run."""
+    since Atlas is two graphs, not one (Chapter 15's multi-agent boundary),
+    plus SLA Watch's own graph as of Chapter 27. invoke() already returns
+    the full final state for whichever graph ran - route and messages from
+    the main graph, handoffs and messages from the research graph - no
+    separate get_state() call needed for a fresh run."""
+    if inputs["target"] == "sla_watch":
+        return run_sla_watch(inputs)
     message = {"role": "user", "content": inputs["message"]}
     config = {"configurable": {"thread_id": f"eval-{uuid.uuid4()}"}}
     if inputs["target"] == "research":
@@ -172,7 +230,11 @@ def run_atlas(inputs: dict) -> dict:
 
 
 ALL_EVALUATORS = [
-    routing_correct, handoffs_within_bound, tool_call_correct, answer_quality
+    routing_correct,
+    handoffs_within_bound,
+    tool_call_correct,
+    answer_quality,
+    checkins_sent_only_if_approved,
 ]
 
 
