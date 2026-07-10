@@ -26,9 +26,24 @@ instead, as an ordered stack of layers on the agent-loop seam:
 `atlas/agent.py`'s `resolve_agent` composes these four in
 `[pii, summarizer, AuthorityGate(), approval]` - list order is nesting
 order (first = outermost); see "Composing the stack".
+
+Chapter 20, "Observability and Debugging with LangSmith", closes a gap
+between `pii`'s wire-level redaction and what LangSmith's tracing client
+records - see "The PII redaction ordering bug, made concrete". `pii`
+redacting the stream says nothing about what a trace stores; the two are
+independent sinks fed by independent mechanisms. `EMAIL_PATTERN` is the one
+shared definition of what counts as an email: its `.pattern` string form is
+`pii`'s `detector=` (matching `PIIMiddleware`'s actual contract - a custom
+`detector` is a callable returning `list[PIIMatch]` or a plain regex pattern
+string, verified against the installed `langchain==1.3.0` build; a callable
+returning a *redacted string* - the earlier draft's mistake - raises
+`AttributeError: 'str' object has no attribute 'get'` the moment content is
+scanned), and `redact_email` (built from the same compiled pattern) is what
+`atlas/tracing.py`'s `Client(hide_outputs=...)` uses for the trace side.
 """
 
 import logging
+import re
 from collections.abc import Callable
 
 from langchain.agents.middleware import (
@@ -48,9 +63,35 @@ log = logging.getLogger("atlas")
 # One PIIMiddleware instance covers both directions - two separate instances
 # for the same pii_type collide on create_agent's duplicate-middleware check
 # (both resolve to the name "PIIMiddleware[email]"). See the module docstring.
+
+# Chapter 20: the ONE shared definition of "what is an email" - PIIMiddleware
+# below uses its .pattern string as a detector; atlas/tracing.py's
+# redact_trace_outputs uses the compiled pattern directly via redact_email.
+EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
 pii = PIIMiddleware(
-    "email", strategy="redact", apply_to_input=True, apply_to_output=True
+    "email",
+    strategy="redact",
+    apply_to_input=True,
+    apply_to_output=True,
+    detector=EMAIL_PATTERN.pattern,  # <1>
 )
+
+
+def redact_email(text: str) -> str:
+    """Atlas's own string-level redaction, built from the same EMAIL_PATTERN
+    passed to `pii` above - so the wire and the trace (atlas/tracing.py's
+    `redact_trace_outputs`) can never disagree about what "redacted" means.
+    """
+    return EMAIL_PATTERN.sub("[EMAIL]", text)
+
+
+# 1. A regex pattern string, not a callable - PIIMiddleware's `detector=`
+#    contract expects either `None` (its own built-in detector), a plain
+#    regex pattern string, or a callable returning `list[PIIMatch]`. A
+#    callable that returns a *redacted string* (what `redact_email` returns)
+#    satisfies none of those and breaks the moment content is scanned - the
+#    pattern-string form is what "one shared definition" has to mean here.
 
 # --- History summarization: bound context growth, keep recent turns. -------
 summarizer = SummarizationMiddleware(

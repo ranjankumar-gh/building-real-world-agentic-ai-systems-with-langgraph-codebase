@@ -56,6 +56,18 @@ rather than let the run loop forever or hit LangGraph's `recursion_limit` -
 the chapter's point that a multi-agent recursion crash takes down the
 coordinator and every specialist with it, worse than a single-agent runaway.
 
+Chapter 20, "Observability and Debugging with LangSmith", finally supplies
+the `doc_research` specialist this module deferred all the way back at
+Chapter 16 ("Wire it with StateGraph..." named it in prose but gave no
+code) - given now as code alongside `name=` on `supervisor` and on
+`web_research`'s own scoped `create_agent` call. See "Naming the fleet:
+attribution across the supervisor topology". Like `web_research`,
+`doc_research` is not mounted into a compiled `StateGraph` anywhere in this
+module - Chapter 17's `research_graph` (the Send-based map-reduce subgraph
+below) is the wiring `atlas/graph.py` actually mounts; `supervisor`/
+`web_research`/`doc_research` remain the hand-rolled illustration Chapter
+16 built and this chapter re-visits purely for attribution.
+
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", is where the "full
 parallel wiring" this docstring deferred above finally lands - but not as a
 literal refactor of `web_research`/`doc_research` into fanned-out workers.
@@ -88,7 +100,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Command, Send
 
-from atlas.tools import text_of, web_search_tool
+from atlas.tools import search_kb, text_of, web_search_tool
 
 
 class ResearchState(TypedDict):
@@ -131,12 +143,32 @@ supervisor = create_agent(
         "sub-tasks and delegate each with a precise, self-contained task "
         "description. Do not research yourself."
     ),
+    name="supervisor",  # Chapter 20: see "Naming the fleet".
 )
 
 
 def web_research(state: ResearchState) -> dict:
     """A specialist node: reads its SCOPED assignment, not the transcript."""
-    agent = create_agent(model="claude-sonnet-4-6", tools=[web_search_tool])
+    agent = create_agent(
+        model="claude-sonnet-4-6", tools=[web_search_tool], name="web-research"
+    )
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": state["assignment"]}]}
+    )
+    return {"findings": [text_of(result["messages"][-1])]}
+
+
+def doc_research(state: ResearchState) -> dict:
+    """A specialist node: reads its SCOPED assignment, not the transcript.
+
+    Chapter 20 finally supplies this specialist as code - deferred as prose
+    only since Chapter 16 (see the module docstring). Identical shape to
+    `web_research`, against `atlas/tools.py`'s Chapter 7 knowledge-base tool
+    instead of the web-search one, with its own distinct trace name so a
+    trace tree does not read as the same specialist calling itself twice."""
+    agent = create_agent(
+        model="claude-sonnet-4-6", tools=[search_kb], name="doc-research"
+    )
     result = agent.invoke(
         {"messages": [{"role": "user", "content": state["assignment"]}]}
     )

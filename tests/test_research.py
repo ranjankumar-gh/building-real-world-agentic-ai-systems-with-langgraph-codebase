@@ -14,7 +14,14 @@ Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds the Send-based
 map-reduce tests below: `search_source`/`SourceUnavailable` is a seeded,
 mockable backend (no live call, no mocking needed), so `fan_out`,
 `research_worker`, and the compiled `research_graph` are all exercised for
-real, including the end-to-end fan-out/reduce/partial-failure behavior."""
+real, including the end-to-end fan-out/reduce/partial-failure behavior.
+
+Chapter 20, "Observability and Debugging with LangSmith", adds `name=` to
+`supervisor` and to the scoped `create_agent` each of `web_research`/
+`doc_research` builds - see "Naming the fleet: attribution across the
+supervisor topology" - and finally supplies `doc_research` as code (Chapter
+16 deferred it to prose only). `doc_research`'s own scoped agent is faked
+the same way `web_research`'s already is, so no live model call happens."""
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -25,6 +32,7 @@ from atlas import research as research_module
 from atlas.research import (
     MAX_HANDOFFS,
     SourceUnavailable,
+    doc_research,
     fan_out,
     make_handoff,
     research_graph,
@@ -156,6 +164,80 @@ def test_web_research_reads_only_the_scoped_assignment_not_the_full_history(monk
         {"role": "user", "content": "Find the refund policy."}
     ]
     assert result == {"findings": ["Refunds: 30-day window."]}
+
+
+def test_web_research_names_its_scoped_agent_for_the_trace_tree(monkeypatch):
+    """Without name="web-research", the specialist would still trace
+    correctly - just under create_agent's generic default, indistinguishable
+    from doc_research calling itself twice."""
+    captured_kwargs = {}
+
+    class _FakeAgent:
+        def invoke(self, input_):
+            return {"messages": [AIMessage("ok")]}
+
+    def _fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeAgent()
+
+    monkeypatch.setattr(research_module, "create_agent", _fake_create_agent)
+
+    web_research({"assignment": "task", "findings": [], "handoffs": 0})
+
+    assert captured_kwargs["name"] == "web-research"
+
+
+def test_doc_research_reads_only_the_scoped_assignment_not_the_full_history(
+    monkeypatch,
+):
+    """Chapter 20 finally supplies doc_research as code - identical shape to
+    web_research, against search_kb instead of web_search_tool."""
+    captured_input = {}
+
+    class _FakeAgent:
+        def invoke(self, input_):
+            captured_input.update(input_)
+            return {"messages": [AIMessage("Refunds: 30-day window.")]}
+
+    monkeypatch.setattr(research_module, "create_agent", lambda **_: _FakeAgent())
+
+    state = {
+        "messages": [{"role": "user", "content": "irrelevant prior turns"}],
+        "assignment": "Find the refund policy.",
+        "findings": [],
+        "handoffs": 1,
+    }
+
+    result = doc_research(state)
+
+    assert captured_input["messages"] == [
+        {"role": "user", "content": "Find the refund policy."}
+    ]
+    assert result == {"findings": ["Refunds: 30-day window."]}
+
+
+def test_doc_research_names_its_scoped_agent_for_the_trace_tree(monkeypatch):
+    captured_kwargs = {}
+
+    class _FakeAgent:
+        def invoke(self, input_):
+            return {"messages": [AIMessage("ok")]}
+
+    def _fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeAgent()
+
+    monkeypatch.setattr(research_module, "create_agent", _fake_create_agent)
+
+    doc_research({"assignment": "task", "findings": [], "handoffs": 0})
+
+    assert captured_kwargs["name"] == "doc-research"
+
+
+def test_supervisor_is_named_for_the_trace_tree():
+    """`name="supervisor"` turns the coordinator's generic AgentExecutor
+    span into a labeled one - the same fix web_research/doc_research get."""
+    assert supervisor.name == "supervisor"
 
 
 def test_route_from_specialist_returns_to_the_supervisor_below_the_bound():

@@ -12,13 +12,28 @@ real payment provider's `Idempotency-Key` header works.
 
 `atlas/graph.py`'s `refund` node imports `idempotency_key` and
 `charge_refund` from here and is the only caller.
+
+Chapter 20, "Observability and Debugging with LangSmith", adds `@traceable`
+to `idempotency_key` - see "Turning tracing on, by environment". A plain
+Python function called from inside an already-traced node is otherwise
+invisible in a trace: `create_agent`/`StateGraph` runs self-instrument once
+tracing is on, but a helper function they call is not itself a LangChain
+runnable, so it disappears into the parent span unless `@traceable` gives
+it one of its own. Decorating it needs no live LangSmith connection -
+`@traceable` only submits a run when `LANGSMITH_TRACING` is actually
+"true"; see `tests/test_effects.py`.
 """
 
+from langsmith import traceable
 
+
+@traceable(run_type="tool", name="idempotency_key")
 def idempotency_key(thread_id: str, ticket_id: str) -> str:
     """A stable key for one logical refund. Identical across retries and
     resumes - never random, never time-based - so repeated attempts at the
-    same refund collapse to the same key."""
+    same refund collapse to the same key. Now visible in a trace (Chapter
+    20) - without @traceable it ran invisibly inside whatever node called
+    it."""
     return f"refund:{thread_id}:{ticket_id}"
 
 

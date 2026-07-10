@@ -12,7 +12,18 @@ chapter's first draft had: `create_agent` identifies each `PIIMiddleware` by
 `pii_type` alone, so two separate instances for the same type (one
 `apply_to_input`, one `apply_to_output`) collide and `create_agent` raises
 `AssertionError: Please remove duplicate middleware instances.` - fixed by
-folding both flags onto the single `pii` instance below."""
+folding both flags onto the single `pii` instance below.
+
+Chapter 20, "Observability and Debugging with LangSmith", adds `EMAIL_PATTERN`
+and `redact_email`, and wires `EMAIL_PATTERN.pattern` into `pii`'s own
+`detector=`. See "The PII redaction ordering bug, made concrete": the
+chapter's first draft passed `redact_email` itself (a `Callable[[str],
+str]`) as `detector=`, which does not satisfy `PIIMiddleware`'s actual
+contract (`Callable[[str], list[PIIMatch]] | str | None`) - confirmed
+against the installed `langchain==1.3.0` build, `_process_content` raises
+`AttributeError: 'str' object has no attribute 'get'` the moment content is
+scanned. `test_pii_detector_is_a_regex_pattern_string_not_a_broken_callable`
+guards against that regression."""
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
@@ -24,7 +35,7 @@ from langchain.agents.middleware import (
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 
-from atlas.middleware import AuthorityGate, approval, pii, summarizer
+from atlas.middleware import EMAIL_PATTERN, AuthorityGate, approval, pii, redact_email, summarizer
 
 
 def _request(name: str, args: dict) -> ToolCallRequest:
@@ -109,3 +120,36 @@ def test_authority_gate_passes_through_other_tools_unconditionally():
         return "delegated"
 
     assert gate.wrap_tool_call(request, handler) == "delegated"
+
+
+# --- Chapter 20: trace/wire PII redaction share one EMAIL_PATTERN ----------
+
+
+def test_redact_email_masks_every_address_in_the_text():
+    assert redact_email("reach jane@example.com or john@example.com") == (
+        "reach [EMAIL] or [EMAIL]"
+    )
+
+
+def test_redact_email_leaves_text_without_an_email_untouched():
+    assert redact_email("no email here") == "no email here"
+
+
+def test_pii_detector_is_a_regex_pattern_string_not_a_broken_callable():
+    """Guards the chapter's real bug: PIIMiddleware's detector= contract is
+    `Callable[[str], list[PIIMatch]] | str | None`, not `Callable[[str],
+    str]`. Passing redact_email itself (which returns a redacted STRING)
+    breaks the moment content is scanned - the fix is passing
+    EMAIL_PATTERN.pattern (a plain regex string) instead."""
+    assert pii.detector is not redact_email
+    assert isinstance(EMAIL_PATTERN.pattern, str)
+
+
+def test_pii_scans_content_without_raising_with_the_fixed_detector():
+    """End-to-end proof the fix works: scanning real content through pii's
+    configured detector must not raise - the exact failure mode the
+    broken `detector=redact_email` draft hit."""
+    redacted_text, matches = pii._process_content("contact me at a@b.com")
+
+    assert redacted_text == "contact me at [REDACTED_EMAIL]"
+    assert matches[0]["value"] == "a@b.com"

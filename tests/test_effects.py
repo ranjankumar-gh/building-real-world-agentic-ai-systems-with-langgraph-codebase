@@ -1,6 +1,14 @@
 """Chapter 10, "Durable Execution, Long-Running Workflows, and State
 Migration" - atlas/effects.py's idempotency key and idempotent refund
-operation, isolated from the graph so they are testable on their own."""
+operation, isolated from the graph so they are testable on their own.
+
+Chapter 20, "Observability and Debugging with LangSmith", decorates
+`idempotency_key` with `@traceable` - see "Turning tracing on, by
+environment". Decorating and calling it needs no live LangSmith connection:
+`@traceable` only submits a run once `LANGSMITH_TRACING` is actually
+"true", so the existing return-value tests above still exercise the real
+function with no mocking, and the new test below just confirms the
+decorator applied without changing behavior."""
 
 import pytest
 
@@ -79,3 +87,12 @@ def test_refund_error_is_a_plain_runtime_error_the_retry_policy_can_target():
     assert issubclass(RefundError, RuntimeError)
     with pytest.raises(RefundError):
         raise RefundError("backend rejected the refund")
+
+
+def test_idempotency_key_is_traceable_and_still_returns_the_same_value():
+    """Chapter 20: @traceable wraps the function without a live LangSmith
+    connection or changing its return value - the trace it produces (once
+    LANGSMITH_TRACING is on) is a byproduct of the same call, not a second
+    code path."""
+    assert hasattr(idempotency_key, "__wrapped__")
+    assert idempotency_key("thread-9", "T-9001") == "refund:thread-9:T-9001"

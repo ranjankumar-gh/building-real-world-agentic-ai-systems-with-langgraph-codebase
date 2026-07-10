@@ -2,6 +2,8 @@
 Chapter 8, "The Middleware System", adds coverage for the middleware= wiring.
 Chapter 12, "Context Engineering", adds coverage for the context_budget
 middleware folded into the same stack.
+Chapter 20, "Observability and Debugging with LangSmith", adds coverage for
+`name="resolve-agent"` and the `run_resolve` attribution wrapper.
 
 See "Binding the model" and "Reaching external tools with MCP". Building
 `create_agent` (and `init_chat_model`) does not require a live API key -
@@ -10,7 +12,13 @@ the MCP empty-tools guard, matching the no-live-call convention from
 `tests/test_hello.py` (Chapter 2). No test here spins up a real MCP
 client/server pair (no pytest-asyncio dependency either): `client.get_tools()`
 is monkeypatched, and the async builder is driven with `asyncio.run`, the
-same pattern `tests/test_graph.py` uses for `retrieve_async`."""
+same pattern `tests/test_graph.py` uses for `retrieve_async`.
+
+`run_resolve`'s own `resolve_agent.invoke(...)` call is monkeypatched the
+same way `tests/test_research.py` fakes `web_research`'s scoped agent - no
+live model call, entering `trace()` needs no live LangSmith connection
+either (see "Naming the fleet"), so the test proves the attribution
+wrapper's own logic (tags, metadata, delegation) without either service."""
 
 import asyncio
 
@@ -25,6 +33,7 @@ from atlas.agent import (
     build_resolve_agent_from_model_id,
     context_budget,
     resolve_agent,
+    run_resolve,
 )
 from atlas.context import ContextBudget
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
@@ -121,3 +130,61 @@ def test_build_resolve_agent_refuses_to_start_when_mcp_returns_no_tools(monkeypa
 
     with pytest.raises(RuntimeError, match="no tools"):
         asyncio.run(build_resolve_agent())
+
+
+# --- Chapter 20: attribution across resolve_agent's turn -------------------
+
+
+def test_resolve_agent_is_named_for_the_trace_tree():
+    """`name=` turns a generic AgentExecutor span into "resolve-agent" -
+    the cheapest fix in the chapter."""
+    assert resolve_agent.name == "resolve-agent"
+
+
+def test_run_resolve_wraps_the_invoke_in_a_trace_context_and_returns_its_result(
+    monkeypatch,
+):
+    """The trace() context adds tags/metadata once at the entry point;
+    resolve_agent.invoke is faked so no live model call happens, and
+    LANGSMITH_TRACING is left off so trace() stays a local no-op context
+    manager - proving run_resolve's own delegation logic, not LangSmith's."""
+    captured = {}
+
+    class _FakeAgent:
+        def invoke(self, inputs, config):
+            captured["inputs"] = inputs
+            captured["config"] = config
+            return {"messages": [{"role": "assistant", "content": "done"}]}
+
+    monkeypatch.setattr(agent_module, "resolve_agent", _FakeAgent())
+
+    inputs = {"messages": [{"role": "user", "content": "hello"}]}
+    config = {
+        "configurable": {
+            "route": "resolve",
+            "thread_id": "t-1",
+            "customer_id": "cust-1",
+        }
+    }
+
+    result = run_resolve(inputs, config)
+
+    assert result == {"messages": [{"role": "assistant", "content": "done"}]}
+    assert captured["inputs"] == inputs
+    assert captured["config"] == config
+
+
+def test_run_resolve_requires_route_thread_id_and_customer_id_in_configurable(
+    monkeypatch,
+):
+    """A caller that forgets to set one of these gets a loud KeyError, not a
+    trace silently missing an attribution dimension."""
+
+    class _FakeAgent:
+        def invoke(self, inputs, config):
+            return {}
+
+    monkeypatch.setattr(agent_module, "resolve_agent", _FakeAgent())
+
+    with pytest.raises(KeyError):
+        run_resolve({"messages": []}, {"configurable": {}})

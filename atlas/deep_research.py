@@ -46,7 +46,18 @@ agent run); calling `source_lookup.func(...)` directly, with no run
 underneath it, now raises `RuntimeError` - see
 tests/test_deep_research.py, which exercises the tool from inside a real
 (tiny) compiled graph instead, the same discipline Chapter 18's
-`research_namespace` tests already established for `get_config()`."""
+`research_namespace` tests already established for `get_config()`.
+
+Chapter 20, "Observability and Debugging with LangSmith", makes no code
+change here: `source_researcher["name"]` was already required by the
+`create_deep_agent` harness (it is not optional on a `SubAgent`), so unlike
+`atlas/agent.py`'s `resolve_agent` or `atlas/research.py`'s `supervisor` -
+which needed a `name=` ADDED - this value was already doing tracing work
+without anyone deciding it should. See "Naming the fleet: attribution
+across the supervisor topology": every ephemeral sub-agent the `task` tool
+spawns shows up in a trace tree under `source_researcher`, distinguishing
+"three sub-agents spawned" from "the source_researcher ran three times."
+"""
 
 from deepagents import create_deep_agent
 from deepagents.backends.store import StoreBackend

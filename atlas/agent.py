@@ -54,6 +54,7 @@ compose in the right order" structurally, not by list ordering.
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langsmith import trace
 
 from atlas.context import Budget, ContextBudget
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
@@ -87,6 +88,8 @@ resolve_agent = create_agent(
     tools=RESOLVE_TOOLS,
     system_prompt=RESOLVE_PROMPT,
     middleware=[pii, context_budget, summarizer, AuthorityGate(), approval],  # <1>
+    name="resolve-agent",  # Chapter 20: turns a generic AgentExecutor span
+    # into "resolve-agent" in the trace tree - see "Naming the fleet".
 )
 
 # 1. Order is the whole point: the first entry is the outermost wrapper, so
@@ -132,3 +135,26 @@ async def build_resolve_agent():
 #    silently shrinking the authority surface.
 # 2. MCP tools and in-process tools are the same type from here on; the
 #    agent does not distinguish them.
+
+
+def run_resolve(inputs: dict, config: dict) -> dict:
+    """Chapter 20: the attribution layer around every turn `resolve_agent`
+    takes. See "Naming the fleet: attribution across the supervisor
+    topology". `name="resolve-agent"` above turns the span itself into a
+    labeled one; the `trace()` context here adds tags and metadata ONCE, at
+    this single entry point, rather than scattering `tags=` across call
+    sites where they could drift out of sync. `route`, `thread_id`, and
+    `customer_id` are expected on `config["configurable"]` by the caller -
+    reusing Chapter 6's routing decision and Chapter 9/13's existing
+    identifiers rather than inventing new ones. Building/entering `trace()`
+    needs no live LangSmith connection - it is a local context manager that
+    only submits data once `LANGSMITH_TRACING` is actually "true"."""
+    with trace(
+        name="atlas-turn",
+        tags=["atlas", config["configurable"]["route"]],
+        metadata={
+            "thread_id": config["configurable"]["thread_id"],
+            "customer_id": config["configurable"]["customer_id"],
+        },
+    ):
+        return resolve_agent.invoke(inputs, config)
