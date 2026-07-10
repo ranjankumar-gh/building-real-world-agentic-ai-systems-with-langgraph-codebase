@@ -5,8 +5,10 @@ running project, **Atlas**, incrementally across the book's chapters.
 
 Atlas starts as a customer-support assistant and later grows two extensions that justify a
 multi-agent boundary: an internal-data agent and a research agent. All backends (knowledge base,
-ticket API, research corpus) ship as seeded, in-memory fakes under `atlas/backends/` - everything
-here runs locally, with no external accounts.
+ticket API, research corpus) ship as small seeded, in-memory fakes inline in the module that owns
+them (`_KB`/`_TICKETS` in `atlas/tools.py`, `_REFUNDS`/`_LEDGER` in `atlas/effects.py`, plus the
+Chapter 1/2 stand-ins in `atlas/naive.py`/`atlas/hello.py`) - everything here runs locally, with no
+external accounts.
 
 ## Tags
 
