@@ -109,7 +109,15 @@ free-form per-request dict `approval_gate`/`refund` already read
 ticket-scoped data from. Like `remember`/`recall` before it, `research` is
 added to `builder` (the chapter's own code calls `add_node`) but is not
 wired into `route_from_triage`'s edges - the chapter names the node, not a
-place in the routing topology to reach it from."""
+place in the routing topology to reach it from.
+
+Chapter 21, "Evaluation and Testing", factors the builder-assembly wiring out
+into `_make_builder` and adds `build_graph(model=...)` on top of it - a
+small, additive refactor so `atlas/replay.py`'s checkpoint-replay fixture can
+substitute Chapter 1's `ScriptedModel` for the triage step's decision source
+without touching `builder`/`graph` (still built exactly as before, via
+`_make_builder(triage)`), which `tests/test_graph.py` and every other
+chapter's tests continue to depend on unchanged."""
 
 import asyncio
 from typing import Literal
@@ -341,58 +349,92 @@ def research(state: AtlasState) -> dict:
     return {"messages": [summarize_findings(out["findings"])]}
 
 
-builder = StateGraph(AtlasState)
-builder.add_node("triage", triage)
-builder.add_node(
-    "retrieve",
-    retrieve,
-    # First look at durable execution (full treatment: Chapter 10). Safe here
-    # because retrieve is a read; do not add a retry_policy to a
-    # side-effecting node without the discipline Chapter 10 covers.
-    retry_policy=RetryPolicy(max_attempts=3, retry_on=(ConnectionError,)),
-)
-builder.add_node("answer", answer)
-builder.add_node("escalate", escalate)
-# Chapter 11: the approval gate - no retry_policy, no side effect. It only
-# interrupts and routes; retrying a suspended interrupt is not the same kind
-# of retry Chapter 10 earned for refund.
-builder.add_node("approval_gate", approval_gate)
-builder.add_node(
-    "refund",
-    refund,
-    # Chapter 10: safe now that refund is idempotent (earns the retry
-    # Chapter 4 forbade on side-effecting nodes). error_handler runs only
-    # after retries are exhausted and compensates by routing to escalate.
-    retry_policy=RetryPolicy(max_attempts=3, retry_on=(RefundError,)),
-    error_handler=refund_failed,
-)
-# Chapter 17: the research subgraph, mounted like any other node - reusable,
-# internally parallel, independently testable. Not wired into
-# route_from_triage below; see the module docstring's Chapter 17 paragraph.
-builder.add_node("research", research)
+def _make_builder(triage_node) -> StateGraph:
+    """Chapter 21, "Testing non-determinism": the wiring shared by the
+    module-level `builder` below and every fixture graph `build_graph`
+    constructs - the exact same Chapter 6-17 topology, parameterized only on
+    which triage callable is wired in for the "triage" node."""
+    b = StateGraph(AtlasState)
+    b.add_node("triage", triage_node)
+    b.add_node(
+        "retrieve",
+        retrieve,
+        # First look at durable execution (full treatment: Chapter 10). Safe
+        # here because retrieve is a read; do not add a retry_policy to a
+        # side-effecting node without the discipline Chapter 10 covers.
+        retry_policy=RetryPolicy(max_attempts=3, retry_on=(ConnectionError,)),
+    )
+    b.add_node("answer", answer)
+    b.add_node("escalate", escalate)
+    # Chapter 11: the approval gate - no retry_policy, no side effect. It
+    # only interrupts and routes; retrying a suspended interrupt is not the
+    # same kind of retry Chapter 10 earned for refund.
+    b.add_node("approval_gate", approval_gate)
+    b.add_node(
+        "refund",
+        refund,
+        # Chapter 10: safe now that refund is idempotent (earns the retry
+        # Chapter 4 forbade on side-effecting nodes). error_handler runs only
+        # after retries are exhausted and compensates by routing to escalate.
+        retry_policy=RetryPolicy(max_attempts=3, retry_on=(RefundError,)),
+        error_handler=refund_failed,
+    )
+    # Chapter 17: the research subgraph, mounted like any other node -
+    # reusable, internally parallel, independently testable. Not wired into
+    # route_from_triage below; see the module docstring's Chapter 17
+    # paragraph.
+    b.add_node("research", research)
 
-builder.add_edge(START, "triage")
-# Chapter 11: triage's "refund" route now lands on the approval gate, not on
-# refund directly - the gate decides whether refund ever runs. ALLOWED_ROUTES
-# and route_from_triage are unchanged; only the physical destination for the
-# "refund" route moves behind the gate.
-builder.add_conditional_edges(
-    "triage",
-    route_from_triage,
-    {
-        "answer": "answer",
-        "retrieve": "retrieve",
-        "escalate": "escalate",
-        "refund": "approval_gate",
-    },
-)
-builder.add_conditional_edges("retrieve", route_after_retrieve)  # the cycle + its exit
-builder.add_edge("answer", END)
-builder.add_edge("escalate", END)
-builder.add_edge("refund", END)
-# approval_gate has no static outgoing edge - it always returns a Command
-# with goto="refund" or goto="escalate", the same dynamic-routing shape
-# triage_with_command uses above.
+    b.add_edge(START, "triage")
+    # Chapter 11: triage's "refund" route now lands on the approval gate, not
+    # on refund directly - the gate decides whether refund ever runs.
+    # ALLOWED_ROUTES and route_from_triage are unchanged; only the physical
+    # destination for the "refund" route moves behind the gate.
+    b.add_conditional_edges(
+        "triage",
+        route_from_triage,
+        {
+            "answer": "answer",
+            "retrieve": "retrieve",
+            "escalate": "escalate",
+            "refund": "approval_gate",
+        },
+    )
+    b.add_conditional_edges("retrieve", route_after_retrieve)  # cycle + exit
+    b.add_edge("answer", END)
+    b.add_edge("escalate", END)
+    b.add_edge("refund", END)
+    # approval_gate has no static outgoing edge - it always returns a
+    # Command with goto="refund" or goto="escalate", the same
+    # dynamic-routing shape triage_with_command uses above.
+    return b
+
+
+def build_graph(model=None):
+    """Chapter 21, "Testing non-determinism: replaying a checkpoint": factor
+    the model out to a parameter, the way `create_agent` already takes one,
+    instead of the module-level `classify` every node closes over. `model=
+    None` reconstructs the exact same graph as the module-level `graph`
+    below (the real, `create_agent`-backed `classify`); passing Chapter 1's
+    `atlas.breaks.ScriptedModel` swaps ONLY the triage step's decision
+    source - `triage_node` below reads the scripted model's next response
+    directly, the same one-call-per-turn contract `ScriptedModel` already
+    provides - so a replay fixture can force a specific route deterministically,
+    with zero real model calls, without touching `builder`/`graph` any other
+    test or CI depends on."""
+    if model is None:
+        triage_node = triage
+    else:
+
+        def triage_node(state: AtlasState) -> dict:
+            ai = model.invoke(state["messages"])
+            route = ai.content if ai.content in ALLOWED_ROUTES else "escalate"
+            return {"route": route}
+
+    return _make_builder(triage_node).compile(checkpointer=InMemorySaver())
+
+
+builder = _make_builder(triage)
 
 # Chapter 9: compiled onto a checkpointer, so every superstep is saved. The
 # dev/test default - RAM-backed, gone on restart, but the right tool for
