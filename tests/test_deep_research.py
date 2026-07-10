@@ -7,6 +7,14 @@ does - matching the no-live-call convention from `tests/test_agent.py` and
 seeded, mockable `search_source`/`SourceUnavailable` backend, so it is
 exercised for real, no mocking needed.
 
+Chapter 19, "Streaming", adds one line to `source_lookup` -
+`get_stream_writer()` - which requires an active runnable context, the same
+constraint `research_namespace` already had for `get_config()` (see that
+chapter's tests below). Calling `source_lookup.func(...)` directly, with no
+graph run underneath it, now raises `RuntimeError`, so the two Chapter 18
+tests that used to call it that way are rewritten here to run it from inside
+a real (tiny) compiled graph instead - see `_run_source_lookup_in_a_graph`.
+
 The `research_namespace` tests are the load-bearing ones for this chapter:
 they confirm, against the ACTUALLY INSTALLED `deepagents==0.6.x`, that the
 namespace factory contract is "called with a `Runtime`, not the run's
@@ -37,16 +45,66 @@ from atlas.deep_research import (
 )
 
 
+def _run_source_lookup_in_a_graph(source: str) -> tuple[str, list[dict]]:
+    """Chapter 19: `source_lookup` now calls `get_stream_writer()`, which
+    needs an active runnable context - build a tiny compiled graph whose one
+    node calls the tool directly, and collect both the node's return value
+    and every event the writer pushed onto the "custom" channel."""
+
+    class _S(TypedDict):
+        result: str
+
+    def _node(_state: _S) -> dict:
+        return {"result": source_lookup.func(source)}
+
+    builder = StateGraph(_S)
+    builder.add_node("n", _node)
+    builder.add_edge(START, "n")
+    builder.add_edge("n", END)
+    compiled = builder.compile()
+
+    result = None
+    custom_events: list[dict] = []
+    for chunk in compiled.stream(
+        {"result": ""}, stream_mode=["custom", "values"], version="v2"
+    ):
+        if chunk["type"] == "custom":
+            custom_events.append(chunk["data"])
+        elif chunk["type"] == "values":
+            result = chunk["data"]["result"]
+    return result, custom_events
+
+
 def test_source_lookup_returns_the_seeded_result_for_a_known_source():
-    assert "30 days" in source_lookup.func("docs.internal/refund-policy")
+    result, _ = _run_source_lookup_in_a_graph("docs.internal/refund-policy")
+
+    assert "30 days" in result
 
 
 def test_source_lookup_returns_an_error_string_not_a_raised_exception():
     """Same partial-failure discipline as Chapter 17's `research_worker`: a
     dead source becomes a string the sub-agent can read and report on."""
-    result = source_lookup.func("nope/does-not-exist")
+    result, _ = _run_source_lookup_in_a_graph("nope/does-not-exist")
 
     assert result == "error: source unreachable: nope/does-not-exist"
+
+
+def test_source_lookup_emits_custom_progress_via_get_stream_writer():
+    """Chapter 19: the only channel that reports what the tool is doing
+    mid-execution, not just what it returns."""
+    _, custom_events = _run_source_lookup_in_a_graph("docs.internal/sla")
+
+    assert {"progress": "researching docs.internal/sla"} in custom_events
+
+
+def test_source_lookup_raises_outside_a_graph_run():
+    """`get_stream_writer()` requires an active runnable context, the same
+    constraint `research_namespace` already has for `get_config()` (see
+    `test_research_namespace_raises_outside_a_graph_run` below) - calling the
+    raw function directly, with no graph run underneath it, is not a context
+    it provides on its own."""
+    with pytest.raises(RuntimeError):
+        source_lookup.func("docs.internal/sla")
 
 
 def test_source_researcher_is_a_subagent_declaration_not_a_handoff_tool():

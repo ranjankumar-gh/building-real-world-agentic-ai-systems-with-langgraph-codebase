@@ -38,15 +38,21 @@ and `build_dev_store()` - so this module needs no new infrastructure to
 import or test against; a production deploy swaps them the same way Chapter
 9's `run_durable` and Chapter 13's `build_prod_store` already do.
 
-Chapter 19's streaming example adds one line to `source_lookup` - a
+Chapter 19, "Streaming", adds one line to `source_lookup` below - a
 `get_stream_writer()` progress emission - so that name, like
-`search_source`/`SourceUnavailable`, is load-bearing beyond this chapter."""
+`search_source`/`SourceUnavailable`, is load-bearing beyond this chapter.
+`get_stream_writer()` requires an active runnable context (a real graph or
+agent run); calling `source_lookup.func(...)` directly, with no run
+underneath it, now raises `RuntimeError` - see
+tests/test_deep_research.py, which exercises the tool from inside a real
+(tiny) compiled graph instead, the same discipline Chapter 18's
+`research_namespace` tests already established for `get_config()`."""
 
 from deepagents import create_deep_agent
 from deepagents.backends.store import StoreBackend
 from langchain.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.config import get_config
+from langgraph.config import get_config, get_stream_writer
 
 from atlas.memory import build_dev_store
 from atlas.research import SourceUnavailable, search_source
@@ -55,6 +61,14 @@ from atlas.research import SourceUnavailable, search_source
 @tool
 def source_lookup(source: str) -> str:
     """Look up findings for a single research source."""
+    # Chapter 19, "Streaming": the only line this chapter adds. get_stream_writer()
+    # reports progress on the "custom" channel from INSIDE the tool's own execution -
+    # something stream_mode="updates" cannot see, because it only reports what a node
+    # returns, not what it does mid-run. Requires an active runnable context (a real
+    # graph/agent run); called outside one it raises RuntimeError - see
+    # tests/test_deep_research.py.
+    writer = get_stream_writer()
+    writer({"progress": f"researching {source}"})
     try:
         return search_source(source)
     except SourceUnavailable as exc:
