@@ -21,21 +21,34 @@ Chapter 20, "Observability and Debugging with LangSmith", adds `name=` to
 `doc_research` builds - see "Naming the fleet: attribution across the
 supervisor topology" - and finally supplies `doc_research` as code (Chapter
 16 deferred it to prose only). `doc_research`'s own scoped agent is faked
-the same way `web_research`'s already is, so no live model call happens."""
+the same way `web_research`'s already is, so no live model call happens.
+
+Chapter 24, "Patterns from Production", adds the memory-horizon retrofit:
+`research_ns`/`recall_finding`/`remember_finding`, Chapter 13's
+`profile_ns`/`compact`/`reflect` pattern repointed at research findings. No
+live call and no external service - `store.put`/`store.get` against a real
+`InMemoryStore`, same convention as tests/test_memory.py."""
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolRuntime
+from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Send
 
 from atlas import research as research_module
 from atlas.research import (
+    DEFAULT_TTL_DAYS,
     MAX_HANDOFFS,
     SourceUnavailable,
     doc_research,
     fan_out,
     make_handoff,
+    recall_finding,
+    remember_finding,
     research_graph,
+    research_ns,
     research_worker,
     route_from_specialist,
     search_source,
@@ -341,3 +354,62 @@ def test_research_graph_honors_max_concurrency_in_the_invoke_config():
     )
 
     assert len(result["findings"]) == 2
+
+
+# --- Chapter 24: the memory horizon this extension was missing -------------
+
+
+def test_research_ns_scopes_by_customer_id():
+    """Same privacy-boundary shape as atlas/memory.py's profile_ns, pointed
+    at a "research" namespace instead of "profile"."""
+    assert research_ns("cust-1") == ("customer", "cust-1", "research")
+    assert research_ns("cust-1") != research_ns("cust-2")
+
+
+def test_recall_finding_returns_none_on_a_genuine_miss():
+    store = InMemoryStore()
+
+    assert recall_finding(store, "cust-1", "return policy?") is None
+
+
+def test_remember_finding_then_recall_finding_round_trips():
+    """The write/read pair: a fresh remember_finding is recallable
+    immediately - no TTL has elapsed yet."""
+    store = InMemoryStore()
+
+    remember_finding(store, "cust-1", "return policy?", ["30-day window."])
+
+    assert recall_finding(store, "cust-1", "return policy?") == ["30-day window."]
+
+
+def test_recall_finding_is_scoped_per_customer():
+    store = InMemoryStore()
+    remember_finding(store, "cust-1", "return policy?", ["30-day window."])
+
+    assert recall_finding(store, "cust-2", "return policy?") is None
+
+
+def test_recall_finding_treats_a_stale_hit_as_a_miss():
+    """A hit older than DEFAULT_TTL_DAYS is treated exactly like a miss -
+    both mean re-derive, per the chapter's recall_finding docstring."""
+    store = InMemoryStore()
+    stale = datetime.now(timezone.utc) - timedelta(days=DEFAULT_TTL_DAYS + 1)
+    store.put(
+        research_ns("cust-1"),
+        "return policy?",
+        {"findings": ["30-day window."], "recorded_at": stale.isoformat()},
+    )
+
+    assert recall_finding(store, "cust-1", "return policy?") is None
+
+
+def test_recall_finding_returns_a_hit_just_inside_the_ttl_window():
+    store = InMemoryStore()
+    fresh = datetime.now(timezone.utc) - timedelta(days=DEFAULT_TTL_DAYS - 1)
+    store.put(
+        research_ns("cust-1"),
+        "return policy?",
+        {"findings": ["30-day window."], "recorded_at": fresh.isoformat()},
+    )
+
+    assert recall_finding(store, "cust-1", "return policy?") == ["30-day window."]

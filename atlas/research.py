@@ -88,8 +88,24 @@ runtime. `atlas/graph.py` mounts `research_graph` as a wrapped node (Chapter
 `search_source`/`SourceUnavailable` from here directly, so those two names -
 unlike the still-uncoded `doc_research`/`compile` - are load-bearing beyond
 this module and are not optional).
+
+Chapter 24, "Patterns from Production", retrofits this module with the
+memory horizon (Chapter 13's pattern) it had been missing since this
+research extension was first mounted: `research_ns`/`recall_finding`/
+`remember_finding` are `profile_ns`/`compact`/`reflect` (`atlas/memory.py`)
+repointed at research findings instead of a customer profile. `atlas/
+graph.py`'s `research` node is the actual mounted pipeline this retrofit
+targets - not the never-mounted Chapter 16 `supervisor` illustration above -
+so the intended wiring is a recall check ahead of `research`'s call into
+`research_graph`, and a `remember_finding` call from `summarize_findings`
+once a fresh run's findings are assembled. Neither call site is added to
+`atlas/graph.py` here: the chapter's own code stops at the three store
+functions, the same "named in prose, not given as code" pattern `doc_research`/
+`compile` already established above, so the wiring is not invented here
+either.
 """
 
+from datetime import datetime, timedelta, timezone
 from operator import add
 from typing import Annotated, TypedDict
 
@@ -98,6 +114,7 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AnyMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.store.base import BaseStore
 from langgraph.types import Command, Send
 
 from atlas.tools import search_kb, text_of, web_search_tool
@@ -254,3 +271,38 @@ research_builder.add_conditional_edges("plan", fan_out)  # plan -> N parallel wo
 research_builder.add_edge("research_worker", END)
 
 research_graph = research_builder.compile()  # the map-reduce pipeline
+
+
+# --- Chapter 24: the memory horizon this extension was missing -------------
+#
+# Chapter 13's pattern (atlas/memory.py's profile_ns/compact/reflect),
+# repointed at research findings instead of a customer profile - see "The
+# refactor: giving the research extension a memory horizon".
+
+DEFAULT_TTL_DAYS = 30
+
+
+def research_ns(customer_id: str) -> tuple:
+    return ("customer", customer_id, "research")
+
+
+def recall_finding(store: BaseStore, customer_id: str, query: str) -> list[str] | None:
+    """Chapter 13's recall(), pointed at research findings instead of a
+    profile. Returns None on a miss OR a stale hit - both mean re-derive."""
+    item = store.get(research_ns(customer_id), query)
+    if item is None:
+        return None
+    recorded_at = datetime.fromisoformat(item.value["recorded_at"])
+    if datetime.now(timezone.utc) - recorded_at > timedelta(days=DEFAULT_TTL_DAYS):
+        return None  # a flat 30-day default - Exercise 3 makes this per-fact-kind
+    return item.value["findings"]
+
+
+def remember_finding(
+    store: BaseStore, customer_id: str, query: str, findings: list[str]
+) -> None:
+    store.put(
+        research_ns(customer_id),
+        query,
+        {"findings": findings, "recorded_at": datetime.now(timezone.utc).isoformat()},
+    )
