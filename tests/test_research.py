@@ -8,17 +8,29 @@ does - matching the no-live-call convention already used for
 checked here is the handoff `Command` shape - the chapter's central claim is
 that the payload it carries is a SCOPED assignment, not the transcript - and
 `web_research`, with its own scoped `create_agent` call mocked so no model
-runs."""
+runs.
 
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds the Send-based
+map-reduce tests below: `search_source`/`SourceUnavailable` is a seeded,
+mockable backend (no live call, no mocking needed), so `fan_out`,
+`research_worker`, and the compiled `research_graph` are all exercised for
+real, including the end-to-end fan-out/reduce/partial-failure behavior."""
+
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolRuntime
-from langgraph.types import Command
+from langgraph.types import Command, Send
 
 from atlas import research as research_module
 from atlas.research import (
     MAX_HANDOFFS,
+    SourceUnavailable,
+    fan_out,
     make_handoff,
+    research_graph,
+    research_worker,
     route_from_specialist,
+    search_source,
     supervisor,
     web_research,
 )
@@ -154,3 +166,96 @@ def test_route_from_specialist_degrades_to_compile_at_the_bound():
     """The graceful exit: hitting the explicit bound compiles partial
     findings instead of looping forever or relying on the recursion limit."""
     assert route_from_specialist({"handoffs": MAX_HANDOFFS}) == "compile"
+
+
+# --- Chapter 17: Send-based map-reduce -------------------------------------
+
+
+def test_search_source_returns_the_seeded_result_for_a_known_source():
+    assert "30 days" in search_source("docs.internal/refund-policy")
+
+
+def test_search_source_raises_source_unavailable_for_an_unknown_source():
+    with pytest.raises(SourceUnavailable):
+        search_source("nope/does-not-exist")
+
+
+def test_fan_out_returns_one_send_per_source_scoped_to_that_source():
+    """The map: a routing function returning list[Send] instead of a node
+    name - each Send names research_worker and carries exactly one
+    source, not the whole list."""
+    sends = fan_out({"sources": ["a", "b", "c"]})
+
+    assert all(isinstance(s, Send) for s in sends)
+    assert [s.node for s in sends] == ["research_worker", "research_worker", "research_worker"]
+    assert [s.arg["source"] for s in sends] == ["a", "b", "c"]
+
+
+def test_research_worker_returns_a_result_finding_for_a_reachable_source():
+    delta = research_worker({"source": "docs.internal/sla"})
+
+    assert delta == {
+        "findings": [
+            {
+                "source": "docs.internal/sla",
+                "result": "Enterprise SLA guarantees a 4-hour first response.",
+            }
+        ]
+    }
+
+
+def test_research_worker_returns_an_error_finding_instead_of_raising():
+    """"Handle partial failure in the worker, not around it": a dead source
+    becomes a finding WITH an error key, never an unhandled exception -
+    so one bad source cannot fail the whole superstep."""
+    delta = research_worker({"source": "nope/does-not-exist"})
+
+    assert delta == {
+        "findings": [
+            {"source": "nope/does-not-exist", "error": "source unreachable: nope/does-not-exist"}
+        ]
+    }
+
+
+def test_research_graph_fans_out_and_reduces_findings_for_every_source():
+    """End-to-end through the compiled subgraph: the barrier waits for every
+    fanned-out worker, and the `add` reducer on `findings` merges all of
+    their writes - no gather, no lock, no manual join."""
+    result = research_graph.invoke(
+        {"sources": ["docs.internal/refund-policy", "docs.internal/sla"]}
+    )
+
+    sources_seen = {f["source"] for f in result["findings"]}
+    assert sources_seen == {"docs.internal/refund-policy", "docs.internal/sla"}
+    assert all("result" in f for f in result["findings"])
+
+
+def test_research_graph_survives_one_dead_source_among_several():
+    """A mixed batch - two reachable sources and one dead one - completes
+    with three findings, not a crash: the reduce step sees the error and the
+    graph never raises."""
+    result = research_graph.invoke(
+        {
+            "sources": [
+                "docs.internal/refund-policy",
+                "nope/does-not-exist",
+                "docs.internal/sla",
+            ]
+        }
+    )
+
+    findings_by_source = {f["source"]: f for f in result["findings"]}
+    assert len(findings_by_source) == 3
+    assert "error" in findings_by_source["nope/does-not-exist"]
+    assert "result" in findings_by_source["docs.internal/refund-policy"]
+
+
+def test_research_graph_honors_max_concurrency_in_the_invoke_config():
+    """"Bound the fan-out": max_concurrency is accepted on invoke's config
+    and the run still completes correctly with it set."""
+    result = research_graph.invoke(
+        {"sources": ["docs.internal/refund-policy", "docs.internal/sla"]},
+        config={"max_concurrency": 1},
+    )
+
+    assert len(result["findings"]) == 2

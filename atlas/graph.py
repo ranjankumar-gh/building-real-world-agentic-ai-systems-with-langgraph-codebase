@@ -96,7 +96,20 @@ before them, they are defined and unit-tested here but not wired into
 `builder` below: the chapter's point is the mechanism itself (checkpointer
 vs. store, thread-scoped vs. namespace-scoped), not a specific place in
 Atlas's routing topology to call it - that integration is left to
-Chapter 14, once extraction decides *what* is worth remembering."""
+Chapter 14, once extraction decides *what* is worth remembering.
+
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", mounts
+`atlas/research.py`'s compiled `research_graph` as a node. `AtlasState` and
+`ResearchState` share no keys (Atlas has no native notion of "sources"), so
+per "Subgraphs: the research pipeline as a reusable unit" this cannot be
+mounted directly - `research` below is the wrapping node the chapter shows
+for exactly that case, adapting in with `derive_sources` and back out with
+`summarize_findings`. `derive_sources` reads from `ticket`, the same
+free-form per-request dict `approval_gate`/`refund` already read
+ticket-scoped data from. Like `remember`/`recall` before it, `research` is
+added to `builder` (the chapter's own code calls `add_node`) but is not
+wired into `route_from_triage`'s edges - the chapter names the node, not a
+place in the routing topology to reach it from."""
 
 import asyncio
 from typing import Literal
@@ -112,6 +125,7 @@ from langgraph.types import Command, RetryPolicy, TimeoutPolicy, interrupt
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
 from atlas.memory import profile_ns
+from atlas.research import research_graph
 from atlas.state import AtlasState
 from atlas.tools import KnowledgeBaseUnavailable
 from atlas.triage import classify
@@ -296,6 +310,37 @@ def recall(state: AtlasState, runtime: Runtime) -> dict:
     return {"customer_plan": plan}
 
 
+def derive_sources(state: AtlasState) -> list[str]:
+    """Chapter 17: the parent-to-subgraph input adapter. `AtlasState` has no
+    native "sources" concept, so pull the list from `ticket` - the same
+    free-form, per-request dict `approval_gate`/`refund` already read
+    ticket-scoped fields from."""
+    ticket = state.get("ticket") or {}
+    return ticket.get("sources", [])
+
+
+def summarize_findings(findings: list[dict]) -> AIMessage:
+    """Chapter 17: the subgraph-to-parent output adapter - fold N findings
+    (each a result or a partial-failure error) into one message for the
+    transcript."""
+    lines = [
+        f"- {f['source']}: {f['result']}"
+        if "result" in f
+        else f"- {f['source']}: unavailable ({f['error']})"
+        for f in findings
+    ]
+    return AIMessage("Research findings:\n" + "\n".join(lines))
+
+
+def research(state: AtlasState) -> dict:
+    """Adapt Atlas state to the research subgraph and back. `research_graph`
+    is the Chapter 17 map-reduce pipeline - `plan` -> `Send`-fanned
+    `research_worker`s -> `END` - independently testable and internally
+    parallel; this node is the only place Atlas's own state touches it."""
+    out = research_graph.invoke({"sources": derive_sources(state)})
+    return {"messages": [summarize_findings(out["findings"])]}
+
+
 builder = StateGraph(AtlasState)
 builder.add_node("triage", triage)
 builder.add_node(
@@ -321,6 +366,10 @@ builder.add_node(
     retry_policy=RetryPolicy(max_attempts=3, retry_on=(RefundError,)),
     error_handler=refund_failed,
 )
+# Chapter 17: the research subgraph, mounted like any other node - reusable,
+# internally parallel, independently testable. Not wired into
+# route_from_triage below; see the module docstring's Chapter 17 paragraph.
+builder.add_node("research", research)
 
 builder.add_edge(START, "triage")
 # Chapter 11: triage's "refund" route now lands on the approval gate, not on

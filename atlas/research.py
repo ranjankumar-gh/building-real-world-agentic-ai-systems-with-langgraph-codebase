@@ -55,6 +55,27 @@ becomes genuine concurrency.
 rather than let the run loop forever or hit LangGraph's `recursion_limit` -
 the chapter's point that a multi-agent recursion crash takes down the
 coordinator and every specialist with it, worse than a single-agent runaway.
+
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", is where the "full
+parallel wiring" this docstring deferred above finally lands - but not as a
+literal refactor of `web_research`/`doc_research` into fanned-out workers.
+The chapter's own code ("Building the map-reduce") is a fresh, self-contained
+illustration of the `Send` + reducer shape against a generic `sources` list,
+so that is what is built here too: `search_source`/`SourceUnavailable` (a
+seeded, mockable backend, same convention as `atlas/tools.py`'s `_KB`/`_WEB`),
+`fan_out`, `research_worker`, and a compiled `research_graph` subgraph
+(`plan` -> N parallel `research_worker`s -> `END`) built from exactly the
+fragments the chapter shows. `ResearchState` is *extended* rather than
+duplicated under a colliding second definition: `sources` is new, and
+`findings` widens from `list[str]` (a specialist's prose finding) to
+`list[dict]` (a worker's structured `{"source", "result"}` or
+`{"source", "error"}` finding) - both still merge through the same `add`
+reducer, since neither TypedDict field nor `add` enforce element type at
+runtime. `atlas/graph.py` mounts `research_graph` as a wrapped node (Chapter
+18's `atlas/deep_research.py` and Chapter 19's streaming example both import
+`search_source`/`SourceUnavailable` from here directly, so those two names -
+unlike the still-uncoded `doc_research`/`compile` - are load-bearing beyond
+this module and are not optional).
 """
 
 from operator import add
@@ -63,8 +84,9 @@ from typing import Annotated, TypedDict
 from langchain.agents import create_agent
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AnyMessage, ToolMessage
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.types import Command
+from langgraph.types import Command, Send
 
 from atlas.tools import text_of, web_search_tool
 
@@ -72,7 +94,8 @@ from atlas.tools import text_of, web_search_tool
 class ResearchState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     assignment: str  # the scoped handoff payload
-    findings: Annotated[list[str], add]  # specialists accumulate results
+    sources: list[str]  # NEW (Chapter 17): the map-reduce fan-out list
+    findings: Annotated[list[dict], add]  # widened: workers now write dicts
     handoffs: int  # explicit bound (Chapter 6)
 
 
@@ -128,3 +151,74 @@ def route_from_specialist(state: ResearchState) -> str:
     if state["handoffs"] >= MAX_HANDOFFS:
         return "compile"  # degrade gracefully: compile what we have
     return "supervisor"
+
+
+# --- Chapter 17: Send-based map-reduce -------------------------------------
+#
+# "The supervisor from Chapter 16 is correct and slow" - one specialist at a
+# time via make_handoff's Command routing. This section is the parallel
+# alternative: a routing function returns a list[Send] instead of a node
+# name, LangGraph fans the workers out into one superstep (the barrier), and
+# the findings reducer above does the fan-in. See "Building the map-reduce".
+
+# Seeded, mockable backend - same convention as atlas/tools.py's _KB/_WEB: an
+# in-repo dict standing in for whatever real source lookup research_worker
+# would call, so the fan-out runs fully offline and deterministically in
+# tests. A source not in the dict is treated as unreachable.
+_SOURCES: dict[str, str] = {
+    "docs.internal/refund-policy": "Refunds are honored within 30 days of purchase.",
+    "docs.internal/sla": "Enterprise SLA guarantees a 4-hour first response.",
+    "web/langgraph-overview": "LangGraph is a low-level orchestration runtime.",
+}
+
+
+class SourceUnavailable(RuntimeError):
+    """Raised when a research source cannot be reached."""
+
+
+def search_source(source: str) -> str:
+    """Look up one research source. Raises `SourceUnavailable` for any
+    source not seeded above - the failure `research_worker` below is built
+    to survive without failing the whole fan-out."""
+    if source not in _SOURCES:
+        raise SourceUnavailable(f"source unreachable: {source}")
+    return _SOURCES[source]
+
+
+def fan_out(state: ResearchState) -> list[Send]:
+    """Map: one worker per source, each with a scoped payload."""
+    return [Send("research_worker", {"source": src}) for src in state["sources"]]
+
+
+def research_worker(state: dict) -> dict:
+    """Reduce-side input: one worker, one source, returns one finding."""
+    src = state["source"]
+    try:
+        result = search_source(src)
+        return {"findings": [{"source": src, "result": result}]}
+    except SourceUnavailable as exc:
+        # Partial-failure handling lives here: a dead source returns a
+        # finding WITH an error, not an exception, so one bad source cannot
+        # fail the superstep - the reduce step downstream sees the error and
+        # decides what to do with it.
+        return {"findings": [{"source": src, "error": str(exc)}]}
+
+
+def plan(state: ResearchState) -> dict:
+    """Entry node for the map-reduce subgraph: `sources` already arrives as
+    input (see `atlas/graph.py`'s `derive_sources` adapter), so `plan` has
+    nothing to add yet - it exists to give `fan_out` a named node to hang
+    `add_conditional_edges` off of, exactly as the chapter's own
+    `builder.add_conditional_edges("plan", fan_out)` shows. A real planner
+    that decomposes a request into sources would live here."""
+    return {}
+
+
+research_builder = StateGraph(ResearchState)
+research_builder.add_node("plan", plan)
+research_builder.add_node("research_worker", research_worker)
+research_builder.add_edge(START, "plan")
+research_builder.add_conditional_edges("plan", fan_out)  # plan -> N parallel workers
+research_builder.add_edge("research_worker", END)
+
+research_graph = research_builder.compile()  # the map-reduce pipeline

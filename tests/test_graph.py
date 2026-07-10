@@ -29,8 +29,9 @@ membrane), its `retry_policy` + `error_handler` (`refund_failed`,
 compensating by routing to `escalate`), the additive-migration-safe
 `refund_already_done` read, and `RETRIEVE_TIMEOUT` (a `TimeoutPolicy`
 exercised against `retrieve_async`, since Atlas's compiled topology has no
-async node of its own and the chapter's own example node, "research", does
-not exist in this repo).
+async node of its own; Chapter 10's own example node, "research", did not
+yet exist in this repo - Chapter 17 is what finally adds it, as the mounted
+map-reduce subgraph below).
 
 Chapter 11, "Human-in-the-Loop", adds `approval_gate` in front of the
 membrane `refund` crosses. `approval_gate`'s own routing logic (approve /
@@ -61,6 +62,7 @@ from atlas.graph import (
     AtlasState,
     answer,
     approval_gate,
+    derive_sources,
     escalate,
     graph,
     recall,
@@ -68,10 +70,12 @@ from atlas.graph import (
     refund_already_done,
     refund_failed,
     remember,
+    research,
     retrieve,
     retrieve_async,
     route_after_retrieve,
     route_from_triage,
+    summarize_findings,
     triage,
     triage_with_command,
 )
@@ -308,7 +312,10 @@ def test_graph_compiles_with_the_figure_3_1_branching_topology():
     checkpoint-membrane crossing - and its `error_handler` shows up as an
     internal `__error_handler__refund` pseudo-node, filtered out here the
     same way `__start__`/`__end__` are. Chapter 11 adds `approval_gate`,
-    sitting in front of `refund`."""
+    sitting in front of `refund`. Chapter 17 adds `research`, the mounted
+    map-reduce subgraph - present as a node but, like `remember`/`recall`
+    before it, not wired into any edge, so it is an orphan in this topology
+    on purpose (LangGraph compiles unreachable nodes without error)."""
     node_names = {
         name for name in graph.get_graph().nodes if not name.startswith("__")
     }
@@ -320,6 +327,7 @@ def test_graph_compiles_with_the_figure_3_1_branching_topology():
         "escalate",
         "approval_gate",
         "refund",
+        "research",
     }
 
 
@@ -730,3 +738,77 @@ def test_timeout_policy_is_rejected_at_compile_time_on_a_sync_node():
 
     with pytest.raises(ValueError, match="async"):
         builder.compile()
+
+
+# --- Chapter 17: subgraphs, parallelism, and map-reduce --------------------
+
+
+def test_derive_sources_reads_the_source_list_off_the_ticket():
+    """The parent-to-subgraph input adapter: AtlasState has no native
+    "sources" key, so it comes from the same free-form ticket dict
+    approval_gate/refund already read ticket-scoped fields from."""
+    state = _state(ticket={"id": "T-1001", "sources": ["docs.internal/sla"]})
+
+    assert derive_sources(state) == ["docs.internal/sla"]
+
+
+def test_derive_sources_defaults_to_empty_when_the_ticket_has_no_sources():
+    assert derive_sources(_state(ticket={"id": "T-1001"})) == []
+
+
+def test_derive_sources_tolerates_a_missing_ticket_entirely():
+    assert derive_sources(_state(ticket=None)) == []
+
+
+def test_summarize_findings_reports_a_result_line_per_successful_source():
+    message = summarize_findings(
+        [{"source": "docs.internal/sla", "result": "4-hour first response."}]
+    )
+
+    assert isinstance(message, AIMessage)
+    assert "docs.internal/sla: 4-hour first response." in message.content
+
+
+def test_summarize_findings_reports_an_unavailable_line_for_an_error_finding():
+    """Partial failure surfaces in the summary rather than being dropped -
+    the reduce step's job, per "Handle partial failure in the worker, not
+    around it"."""
+    message = summarize_findings(
+        [{"source": "missing/source", "error": "source unreachable: missing/source"}]
+    )
+
+    assert "missing/source: unavailable (source unreachable: missing/source)" in (
+        message.content
+    )
+
+
+def test_research_node_adapts_atlas_state_into_the_subgraph_and_back():
+    """End-to-end through the REAL compiled research_graph (Chapter 17's
+    seeded backend, no mocking needed) - proof the wrapping node in
+    atlas/graph.py actually round-trips AtlasState through ResearchState."""
+    state = _state(ticket={"id": "T-1001", "sources": ["docs.internal/sla"]})
+
+    delta = research(state)
+
+    [message] = delta["messages"]
+    assert isinstance(message, AIMessage)
+    assert "docs.internal/sla" in message.content
+    assert "4-hour first response" in message.content
+
+
+def test_research_node_survives_an_unreachable_source_without_crashing():
+    state = _state(ticket={"id": "T-1001", "sources": ["nope/does-not-exist"]})
+
+    delta = research(state)
+
+    assert "unavailable" in delta["messages"][0].content
+
+
+def test_research_is_registered_as_a_node_but_not_wired_into_any_edge():
+    """Like remember/recall before it: the chapter's own code adds the node
+    (`builder.add_node("research", research)`) but names no place in the
+    routing topology to reach it from."""
+    assert "research" in graph.nodes
+    graph_edges = graph.get_graph().edges
+    assert not any(edge.source == "research" or edge.target == "research"
+                   for edge in graph_edges)

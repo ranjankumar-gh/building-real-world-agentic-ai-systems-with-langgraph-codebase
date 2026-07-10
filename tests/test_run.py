@@ -11,7 +11,12 @@ service.
 
 Chapter 11, "Human-in-the-Loop", adds `run_to_approval` and
 `resume_approval` - the thread-scoped suspend/resume shape for the
-approval gate in `atlas/graph.py`."""
+approval gate in `atlas/graph.py`.
+
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds `run_research` -
+"Bound the fan-out": `max_concurrency` is set on the invoke config, not the
+graph, so the same `research_graph` can be called with a different bound
+per call."""
 
 import os
 
@@ -24,6 +29,7 @@ from atlas.graph import graph, run_durable
 from atlas.run import (
     inspect,
     resume_approval,
+    run_research,
     run_to_approval,
     run_two_turns,
     run_with_drain,
@@ -257,3 +263,23 @@ def test_run_durable_persists_to_a_real_postgres_backend(monkeypatch):
     result = asyncio.run(run_durable("I need a refund.", config, db_uri=dsn))
 
     assert result["route"] == "answer"
+
+
+# --- Chapter 17: subgraphs, parallelism, and map-reduce --------------------
+
+
+def test_run_research_bounds_the_fan_out_and_still_returns_every_finding():
+    """"Bound the fan-out": max_concurrency=1 forces the workers to run one
+    at a time behind the scenes, but the reducer still merges all of their
+    writes - the bound changes throughput, never correctness."""
+    result = run_research(
+        ["docs.internal/refund-policy", "docs.internal/sla"], max_concurrency=1
+    )
+
+    assert len(result["findings"]) == 2
+
+
+def test_run_research_defaults_max_concurrency_to_eight():
+    result = run_research(["docs.internal/refund-policy"])
+
+    assert result["findings"][0]["source"] == "docs.internal/refund-policy"

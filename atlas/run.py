@@ -24,6 +24,12 @@ finishing. `run_to_approval` returns with `result["__interrupt__"]` set (the
 surfaced proposed refund); `resume_approval` invokes the SAME thread_id with
 a `Command(resume=decision)` carrying the human's decision - no new input,
 just the answer to the question the gate asked.
+
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds `run_research` -
+"Bound the fan-out": ten concurrent workers is fine, a hundred is a
+rate-limit outage, so `max_concurrency` caps how many fanned-out branches
+run at once. Set on `invoke`'s `config`, not on the graph itself - the same
+`research_graph` can be called with a different bound per call.
 """
 
 from langgraph.errors import GraphDrained
@@ -31,6 +37,7 @@ from langgraph.runtime import RunControl
 from langgraph.types import Command, StateSnapshot
 
 from atlas.graph import graph
+from atlas.research import research_graph
 
 
 def run_two_turns(thread_id: str) -> dict:
@@ -120,3 +127,13 @@ def resume_approval(thread_id: str, decision: dict) -> dict:
     any worker."""
     config = {"configurable": {"thread_id": thread_id}}
     return graph.invoke(Command(resume=decision), config)
+
+
+def run_research(sources: list[str], max_concurrency: int = 8) -> dict:
+    """"Bound the fan-out": run the Chapter 17 map-reduce subgraph directly,
+    capping how many `research_worker` branches run at once. The rest queue
+    and fill in as slots free - the difference between "parallel" and a
+    self-inflicted denial-of-service on your own provider quota."""
+    return research_graph.invoke(
+        {"sources": sources}, config={"max_concurrency": max_concurrency}
+    )
