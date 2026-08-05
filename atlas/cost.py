@@ -17,6 +17,8 @@ deployment might instead retry against a cheaper model. Either beats the
 third option - silently continuing to spend past a cap nobody is watching,
 which is what "no per-tenant ceiling" actually means in practice."""
 
+from datetime import datetime, timezone
+
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AIMessage
@@ -25,8 +27,19 @@ from langgraph.store.base import BaseStore
 MONTHLY_TOKEN_CAP = 2_000_000
 
 
-def budget_ns(customer_id: str) -> tuple:
-    return ("customer", customer_id, "budget")
+def current_period(now: datetime | None = None) -> str:
+    """The billing window this call belongs to, as `YYYY-MM`. Injectable so
+    a test can roll the clock without waiting for a month."""
+    return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
+
+
+def budget_ns(customer_id: str, period: str) -> tuple:
+    """One namespace per tenant per period. The period is part of the
+    namespace, so the counter starts at zero on the first of the month
+    because nothing is there yet - not because a reset job remembered to
+    run. Without it, MONTHLY_TOKEN_CAP is a lifetime cap that permanently
+    degrades the first tenant to reach it."""
+    return ("customer", customer_id, "budget", period)
 
 
 def degrade(request: ModelRequest) -> ModelResponse:
@@ -45,20 +58,28 @@ def degrade(request: ModelRequest) -> ModelResponse:
 
 class TenantBudgetGuard(AgentMiddleware):
     """A CUMULATIVE, per-tenant ceiling - Ch12's budget bounds one call;
-    this bounds the sum of all of them, this month."""
+    this bounds the sum of all of them, this month.
+
+    SOFT ceiling, deliberately. The get/put below is a read-modify-write and
+    `BaseStore` has no compare-and-swap (Ch13's own warning), so concurrent
+    calls for one tenant lose increments silently - and that is exactly the
+    runaway-spend case the cap exists for. Good enough as a cost guardrail;
+    not good enough for a cap you have to defend to a customer. For that,
+    put the counter somewhere increments are atomic (Redis INCR, or a row
+    updated in a transaction). See Ch23's callout."""
 
     def __init__(self, store: BaseStore) -> None:
         self.store = store
 
     def wrap_model_call(self, request, handler):
         customer_id: str = request.runtime.context.customer_id
-        ns = budget_ns(customer_id)
-        item = self.store.get(ns, "monthly_tokens")
+        ns = budget_ns(customer_id, current_period())
+        item = self.store.get(ns, "spent")
         spent = item.value["tokens"] if item else 0
         if spent >= MONTHLY_TOKEN_CAP:
             return degrade(request)  # <1>
         estimated = count_tokens_approximately(request.messages)  # <2>
-        self.store.put(ns, "monthly_tokens", {"tokens": spent + estimated})
+        self.store.put(ns, "spent", {"tokens": spent + estimated})
         return handler(request)
 
 

@@ -7,12 +7,20 @@ so an `InMemoryStore` (the same dev/test default `atlas/memory.py` already
 uses) plus a dummy `ModelRequest` (the `test_context.py` convention) is
 enough to exercise it directly."""
 
+from datetime import datetime, timezone
+
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 
-from atlas.cost import MONTHLY_TOKEN_CAP, TenantBudgetGuard, budget_ns, degrade
+from atlas.cost import (
+    MONTHLY_TOKEN_CAP,
+    TenantBudgetGuard,
+    budget_ns,
+    current_period,
+    degrade,
+)
 from atlas.security import AtlasContext
 
 
@@ -25,9 +33,29 @@ def _request(customer_id: str, messages: list) -> ModelRequest:
     )
 
 
-def test_budget_ns_scopes_by_customer():
-    assert budget_ns("C-1") == ("customer", "C-1", "budget")
-    assert budget_ns("C-1") != budget_ns("C-2")
+def test_budget_ns_scopes_by_customer_and_by_period():
+    assert budget_ns("C-1", "2026-08") == ("customer", "C-1", "budget", "2026-08")
+    assert budget_ns("C-1", "2026-08") != budget_ns("C-2", "2026-08")
+
+
+def test_budget_ns_rolls_so_the_cap_is_monthly_not_lifetime():
+    """The defect this guards against: with no period in the namespace,
+    MONTHLY_TOKEN_CAP is a lifetime cap, and the first tenant to reach it is
+    refused service permanently with no reset path."""
+    assert budget_ns("C-1", "2026-08") != budget_ns("C-1", "2026-09")
+
+
+def test_current_period_formats_the_billing_window_as_year_month():
+    assert current_period(datetime(2026, 8, 5, tzinfo=timezone.utc)) == "2026-08"
+
+
+def test_a_tenant_capped_last_month_starts_the_new_month_clean():
+    """The counter reads zero on the first of the month because the new
+    period's namespace is empty - not because a reset job remembered to run."""
+    store = InMemoryStore()
+    store.put(budget_ns("C-1", "2026-08"), "spent", {"tokens": MONTHLY_TOKEN_CAP})
+
+    assert store.get(budget_ns("C-1", "2026-09"), "spent") is None
 
 
 def test_degrade_returns_a_model_response_without_calling_the_model():
@@ -46,7 +74,7 @@ def test_guard_lets_a_fresh_tenant_through_and_records_spend():
     result = guard.wrap_model_call(request, lambda r: "handled")
 
     assert result == "handled"
-    item = store.get(budget_ns("C-1"), "monthly_tokens")
+    item = store.get(budget_ns("C-1", current_period()), "spent")
     assert item.value["tokens"] > 0
 
 
@@ -59,20 +87,20 @@ def test_guard_accumulates_spend_across_multiple_calls():
             _request("C-1", [HumanMessage("what is the refund window")]), lambda r: "handled"
         )
 
-    item = store.get(budget_ns("C-1"), "monthly_tokens")
+    item = store.get(budget_ns("C-1", current_period()), "spent")
     assert item.value["tokens"] > 0
     # three calls costs strictly more than one
     single_store = InMemoryStore()
     TenantBudgetGuard(single_store).wrap_model_call(
         _request("C-1", [HumanMessage("what is the refund window")]), lambda r: "handled"
     )
-    single = single_store.get(budget_ns("C-1"), "monthly_tokens").value["tokens"]
+    single = single_store.get(budget_ns("C-1", current_period()), "spent").value["tokens"]
     assert item.value["tokens"] == single * 3
 
 
 def test_guard_degrades_once_the_cumulative_cap_is_hit_without_calling_the_model():
     store = InMemoryStore()
-    store.put(budget_ns("C-1"), "monthly_tokens", {"tokens": MONTHLY_TOKEN_CAP})
+    store.put(budget_ns("C-1", current_period()), "spent", {"tokens": MONTHLY_TOKEN_CAP})
     guard = TenantBudgetGuard(store)
     called = []
 
@@ -91,7 +119,7 @@ def test_guard_degrades_once_the_cumulative_cap_is_hit_without_calling_the_model
 def test_guard_keeps_tenants_isolated_in_separate_namespaces():
     store = InMemoryStore()
     guard = TenantBudgetGuard(store)
-    store.put(budget_ns("C-over"), "monthly_tokens", {"tokens": MONTHLY_TOKEN_CAP})
+    store.put(budget_ns("C-over", current_period()), "spent", {"tokens": MONTHLY_TOKEN_CAP})
 
     # C-fresh has never spent anything, so it must sail through even though
     # C-over is capped in the same store.

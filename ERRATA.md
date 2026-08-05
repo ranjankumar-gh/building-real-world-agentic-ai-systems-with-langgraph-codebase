@@ -24,6 +24,19 @@ to the current text; they are listed because a v1.0 copy will not have them.
 | `atlas/tools.py`, `atlas/sla_watch.py` | `send_checkin` had no idempotency key, and the "already flagged" claim was written after sending - so a replayed node re-messaged customers, and a ticket parked at the approval gate was re-drafted on every hourly scan | `send_checkin` takes a stable `key` and collapses replays. The claim is written at draft time and released on reject |
 | `atlas/deploy/rollout.py` | `LoadBalancer` `Protocol` and type annotations were missing | Restored, matching the Chapter 22 listing |
 
+### New material (gap-closure pass, same printing)
+
+Four gaps the review found were bigger than corrections - each needed a design decision rather
+than an edit. All four are closed additively; no chapter was renumbered and no settled section
+rewritten.
+
+| Where | What was added |
+|---|---|
+| Ch20, new section + `atlas/alerts.py` | The detection half. Tracing explains a run you already know went wrong; nothing told you it went wrong. Six signals with thresholds and named sources, including time to first token rather than total latency, and the age of the oldest pending approval - the one signal specific to agentic systems, since suspended runs are the only state nothing reclaims. Closes Chapter 1's cost-ceiling and p95 promises, which nothing had measured. |
+| Ch23, new section + `atlas/erasure.py` | Retention and subject erasure. Nothing in the book deleted a checkpoint or a store item, while `AuditGate` deliberately writes raw tool arguments to permanent storage. `erase_customer` deletes what it can, retains the audit record by default, and reports the retention - `ErasureReport.complete` is `False` whenever anything was kept. |
+| Ch23, cost ceiling | `budget_ns` gains the billing period, so `MONTHLY_TOKEN_CAP` is monthly rather than a lifetime cap that permanently degraded the first tenant to reach it. The lossy read-modify-write is now named rather than silently fixed: `BaseStore` has no compare-and-swap, so this is a soft ceiling, and the callout says when to move the counter somewhere increments are atomic. |
+| Preface + README | Reading paths omitted chapters their own included chapters depend on. Corrected, with a note that a path is a route rather than a self-contained subset. The README's pointer back to the preface was circular and now carries the table. |
+
 ### Text
 
 | Chapter | Correction |

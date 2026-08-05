@@ -50,5 +50,16 @@ without one - they are not required for the rest of the suite to pass.
 
 ## Reading paths
 
-See the book's preface for the four reading paths (Atlas fast path, architecture path,
-multi-agent path, migration path) and which chapters/tags each one needs.
+| Path | Reader | Chapters |
+| --- | --- | --- |
+| Atlas fast path | Engineer shipping a first reliable agent | 1-13, 19-23, 27 |
+| Architecture path | Tech lead choosing a stack | 1-3, 15-18, 21-26 |
+| Multi-agent path | Practitioner with a single-agent baseline | 5, 12, 15-18, 21, 23 |
+| Migration path | LangGraph/LangChain 0.x user | 2, Appendix B, Appendix C, then 4-11 |
+
+Each chapter's end state is a tag named for its file stem - `git tag --list` prints them all, and
+`git checkout ch09-persistence-checkpointing` gets you Atlas exactly as that chapter left it.
+
+A path is a route, not a self-contained subset: chapters name the code they build on, and a path
+occasionally sends you back one chapter for a module it assumes. The book's preface carries the
+same table with the outcome each path is aiming at.
