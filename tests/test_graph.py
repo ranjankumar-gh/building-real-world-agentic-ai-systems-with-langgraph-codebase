@@ -1,7 +1,8 @@
 """Chapter 4: atlas/graph.py - the Chapter 3 whiteboard wired into a real,
-compiled StateGraph. helpers stay stubs (NotImplementedError) until
-Chapter 7, so these tests exercise node/edge/reducer behavior with
-monkeypatched stubs rather than a real knowledge base or model.
+compiled StateGraph. Most tests here monkeypatch the helpers so node, edge
+and reducer behavior can be exercised in isolation; the two `..._end_to_end`
+tests at the foot of the file drive the real seeded knowledge base through
+the compiled graph, standing in only for `classify` (the one live model call).
 
 Chapter 6, "Conditional Edges and Dynamic Control Flow", adds the branching
 topology: route validation in `triage`, the two conditional routing
@@ -812,3 +813,43 @@ def test_research_is_registered_as_a_node_but_not_wired_into_any_edge():
     graph_edges = graph.get_graph().edges
     assert not any(edge.source == "research" or edge.target == "research"
                    for edge in graph_edges)
+
+
+def test_atlas_answers_a_knowledge_base_question_end_to_end(monkeypatch):
+    """The answer path, end to end, through the real compiled graph.
+
+    Chapter 4 promised `search_kb`/`compose_answer` would be filled in for
+    real; until they were, `retrieve` raised NotImplementedError and this
+    path had no coverage at all - every other test in this file monkeypatches
+    the helpers, so a stubbed answer path stayed green. Only `classify` is
+    stood in for here (it is the one live model call); everything downstream
+    is the real seeded knowledge base.
+    """
+    monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("retrieve"))
+
+    config = {"configurable": {"thread_id": "test-thread-answer-e2e"}}
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "what is the refund window?"}]},
+        config,
+    )
+
+    assert result["retrieved"], "the seeded KB should have matched"
+    assert result["retrieved"][0]["text"].startswith("Refunds are available")
+    assert "30 days" in result["messages"][-1].content
+
+
+def test_a_knowledge_base_miss_retries_then_escalates_end_to_end(monkeypatch):
+    """The other half of the same path: a real miss returns no documents, so
+    `route_after_retrieve` drives the bounded retry and then escalates
+    gracefully rather than composing an answer it cannot ground."""
+    monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("retrieve"))
+
+    config = {"configurable": {"thread_id": "test-thread-answer-miss-e2e"}}
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "do you sell submarines?"}]},
+        config,
+    )
+
+    assert result["retrieved"] == []
+    assert result["retrieve_attempts"] == MAX_RETRIEVE_ATTEMPTS
+    assert result["ticket"]["status"] == "escalated"

@@ -128,6 +128,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, RetryPolicy, TimeoutPolicy, interrupt
 
 from atlas.effects import RefundError, charge_refund, idempotency_key
@@ -431,7 +432,9 @@ def build_graph(model=None):
             route = ai.content if ai.content in ALLOWED_ROUTES else "escalate"
             return {"route": route}
 
-    return _make_builder(triage_node).compile(checkpointer=InMemorySaver())
+    return _make_builder(triage_node).compile(
+        checkpointer=InMemorySaver(), store=InMemoryStore()
+    )
 
 
 builder = _make_builder(triage)
@@ -439,7 +442,11 @@ builder = _make_builder(triage)
 # Chapter 9: compiled onto a checkpointer, so every superstep is saved. The
 # dev/test default - RAM-backed, gone on restart, but the right tool for
 # tests: it exercises the real checkpointing path with no external service.
-graph = builder.compile(checkpointer=InMemorySaver())
+#
+# Chapter 13 configures the store BESIDE the checkpointer, not instead of it:
+# they do different jobs (in-thread state vs cross-thread facts). Passing it
+# here is what makes `runtime.store` non-None inside `remember`/`recall`.
+graph = builder.compile(checkpointer=InMemorySaver(), store=InMemoryStore())
 
 DB_URI = "postgresql://atlas:atlas@localhost:5432/atlas"
 
@@ -456,7 +463,9 @@ async def run_durable(message: str, config: dict, db_uri: str = DB_URI) -> Atlas
     duration of this call - a real deployment keeps that context open for
     the life of the process instead of opening and closing it per call."""
     async with AsyncPostgresSaver.from_conn_string(db_uri) as checkpointer:
-        durable_graph = builder.compile(checkpointer=checkpointer)
+        durable_graph = builder.compile(
+            checkpointer=checkpointer, store=InMemoryStore()
+        )
         return await durable_graph.ainvoke(
             {"messages": [{"role": "user", "content": message}]},
             config,

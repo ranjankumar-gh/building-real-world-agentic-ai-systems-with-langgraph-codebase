@@ -17,25 +17,66 @@ real `search_kb` tool that chapter builds - a standalone, tool-calling
 `create_agent` (`atlas/agent.py`) can now actually search the knowledge base
 and act on tickets.
 
-`search_kb` and `compose_answer` stay here, still stubs, because
-`atlas/graph.py`'s `retrieve` and `answer` node bodies are not yet rewired to
-call the new tools - that integration (folding a tool-calling agent into
-this graph as a node/sub-agent) is a later chapter's job. Do not implement
-business logic here before then - a chapter that fills in a stub says so
-explicitly, and none has yet for these two.
+`search_kb` and `compose_answer` are the adapters between the graph's node
+calling convention (list of messages in, list of `Doc` out) and the real,
+narrow tool Chapter 7 built. The tool takes a query string and returns article
+text; a node takes state and returns a state delta. That mismatch is the whole
+job of this module - it is a seam, not business logic.
+
+Both are deliberately model-free. `compose_answer` templates the retrieved
+article rather than calling a model, for the same reason
+`atlas/sla_watch.py`'s `compose_checkin` does: the retrieve/answer path then
+runs with no API key and no network, which is what makes the graph's routing,
+retry, and escalation behaviour testable offline.
 """
 
-def search_kb(messages: list) -> list:
-    """Search the knowledge base for the active question. Stub - the real
-    knowledge-base tool exists in atlas/tools.py as of Chapter 7, but this
-    graph node's calling convention (list of messages in, list of hits out)
-    hasn't been rewired to it yet."""
-    raise NotImplementedError("search_kb is a stub; not yet wired to atlas.tools")
+from atlas.state import Doc
+from atlas.tools import search_kb as search_kb_tool
+from atlas.tools import text_of
+
+# The KB returns this exact sentinel when nothing matches - see atlas/tools.py.
+_NO_MATCH = "No knowledge-base article matched."
 
 
-def compose_answer(messages: list, retrieved: list) -> str:
-    """Compose a reply from the conversation and whatever was retrieved. Stub -
-    still unimplemented; see the module docstring."""
-    raise NotImplementedError(
-        "compose_answer is a stub; not yet filled in by any chapter"
-    )
+def _last_user_text(messages: list) -> str:
+    """The active question: the most recent human turn, as plain text."""
+    for message in reversed(messages):
+        if getattr(message, "type", None) == "human":
+            return text_of(message)
+        if isinstance(message, dict) and message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
+
+
+def search_kb(messages: list) -> list[Doc]:
+    """Search the knowledge base for the active question.
+
+    Adapts Chapter 7's `search_kb` tool to the node convention: pull the live
+    question out of the conversation, ask the tool, and wrap the answer as a
+    `Doc` so it merges through `dedup_by_id` on the `retrieved` channel.
+
+    Returns `[]` on a miss rather than a "nothing found" document, because an
+    empty list is what `route_after_retrieve` reads to drive the bounded retry
+    and, eventually, the graceful escalation."""
+    query = _last_user_text(messages)
+    if not query:
+        return []
+    article = search_kb_tool.invoke({"query": query})
+    if article == _NO_MATCH:
+        return []
+    return [Doc(id=f"kb:{query.strip().lower()[:64]}", text=article, score=1.0)]
+
+
+def compose_answer(messages: list, retrieved: list[Doc]) -> str:
+    """Compose a reply from the conversation and whatever was retrieved.
+
+    Deterministic on purpose (see the module docstring). Grounded strictly in
+    `retrieved`: with nothing retrieved this says so rather than inventing an
+    answer, which is the behaviour the escalation path depends on."""
+    if not retrieved:
+        return (
+            "I could not find an article covering that. Passing this to a "
+            "support specialist who can help."
+        )
+    body = " ".join(doc["text"] for doc in retrieved)
+    return f"{body} Let me know if that does not answer your question."

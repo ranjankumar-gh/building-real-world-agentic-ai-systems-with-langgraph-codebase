@@ -117,13 +117,29 @@ class _SLATicketBackend:
     def __init__(self, tickets: list[dict]) -> None:
         self._tickets = tickets
         self.sent: list[dict] = []  # test-visible record of what actually sent
+        self._receipts: dict[str, str] = {}  # idempotency ledger, keyed
+
+    def reset(self) -> None:
+        """Clear the send record and the idempotency ledger. For tests only:
+        the ledger is deliberately process-global (that is what makes it work
+        across a replay), so without this one test's send suppresses the
+        next test's identical key."""
+        self.sent.clear()
+        self._receipts.clear()
 
     def at_risk(self, threshold_hours: int) -> list[dict]:
         return [t for t in self._tickets if t["hours_open"] >= threshold_hours]
 
-    def send_message(self, ticket_id: str, message: str) -> str:
+    def send_message(self, key: str, ticket_id: str, message: str) -> str:
+        """Idempotent by key - the same contract `charge_refund` uses across
+        the checkpoint membrane (Chapter 10). A check-in is an irreversible
+        customer-facing effect, so a replayed node must not re-send it."""
+        if key in self._receipts:
+            return self._receipts[key]
         self.sent.append({"ticket_id": ticket_id, "message": message})
-        return f"check-in sent for {ticket_id}"
+        receipt = f"check-in sent for {ticket_id}"
+        self._receipts[key] = receipt
+        return receipt
 
 
 _SLA_TICKETS = _SLATicketBackend(
@@ -141,11 +157,15 @@ def list_at_risk_tickets(threshold_hours: int) -> list[dict]:
 
 
 @tool
-def send_checkin(ticket_id: str, message: str) -> str:
+def send_checkin(key: str, ticket_id: str, message: str) -> str:
     """Send a check-in message to the customer on one ticket. Narrow by
     design: this tool can send exactly one thing, to one ticket, nothing
-    else - the same authority-surface discipline as set_ticket_status."""
-    return _SLA_TICKETS.send_message(ticket_id, message)
+    else - the same authority-surface discipline as set_ticket_status.
+
+    `key` is a stable idempotency key (Chapter 10): a check-in is an
+    irreversible effect past the membrane, so a resumed or replayed node
+    must collapse onto the same key rather than messaging a customer twice."""
+    return _SLA_TICKETS.send_message(key, ticket_id, message)
 
 
 def text_of(message) -> str:

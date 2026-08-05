@@ -14,9 +14,9 @@ NotImplementedError.
 
 Chapter 7, "Tools, Models, MCP, and create_agent", fills `classify` in for
 real (a validated TriageResult, in atlas/triage.py) - imported from there
-now. `search_kb` and `compose_answer` are still stubs in atlas/helpers.py;
-this whiteboard sketch calls whatever that module currently provides,
-same as it always has.
+now. `search_kb` and `compose_answer` are the adapters in atlas/helpers.py
+onto that same chapter's knowledge-base tool; this whiteboard sketch calls
+whatever that module currently provides, same as it always has.
 """
 
 from typing import Literal, TypedDict

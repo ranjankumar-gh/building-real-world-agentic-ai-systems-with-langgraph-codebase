@@ -10,6 +10,7 @@ hand-built-`Runtime` convention `tests/test_graph.py` and
 the same "prove the suspension is real" discipline Chapter 11's own
 end-to-end test used."""
 
+import pytest
 from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
@@ -24,6 +25,16 @@ from atlas.sla_watch import (
     send_checkins,
 )
 from atlas.tools import _SLA_TICKETS
+
+
+@pytest.fixture(autouse=True)
+def _clean_send_ledger():
+    """`send_checkin` is idempotent by key against a process-global backend,
+    which is what makes it survive a node replay - and what would otherwise
+    let one test's send suppress the next test's identical ticket id."""
+    _SLA_TICKETS.reset()
+    yield
+    _SLA_TICKETS.reset()
 
 
 def _config(thread_id: str) -> dict:
@@ -71,7 +82,7 @@ def test_scan_tickets_skips_a_ticket_already_flagged_in_the_store():
 def test_draft_checkins_builds_one_draft_per_at_risk_ticket():
     state = {"at_risk": [{"ticket_id": "T-2001", "hours_open": 30}]}
 
-    result = draft_checkins(state)
+    result = draft_checkins(state, Runtime(store=InMemoryStore()))
 
     assert len(result["drafts"]) == 1
     assert result["drafts"][0]["ticket_id"] == "T-2001"
@@ -79,7 +90,22 @@ def test_draft_checkins_builds_one_draft_per_at_risk_ticket():
 
 
 def test_draft_checkins_drafts_nothing_when_nothing_is_at_risk():
-    assert draft_checkins({"at_risk": []}) == {"drafts": []}
+    runtime = Runtime(store=InMemoryStore())
+
+    assert draft_checkins({"at_risk": []}, runtime) == {"drafts": []}
+
+
+def test_draft_checkins_claims_the_ticket_so_a_parked_approval_is_not_redrafted():
+    """The flag is written at DRAFT time, not send time. An approval gate can
+    sit for days (Chapter 11) while the scan runs hourly - flagging only on
+    send would leave a parked ticket unflagged, so every subsequent scan would
+    re-draft it and open another interrupt for the same customer."""
+    store = InMemoryStore()
+    state = {"at_risk": [{"ticket_id": "T-2001", "hours_open": 30}]}
+
+    draft_checkins(state, Runtime(store=store))
+
+    assert store.get(flagged_ns(), "T-2001") is not None
 
 
 # --- approval_gate: interrupts with the drafts, returns the decisions ------
@@ -218,3 +244,23 @@ def test_a_second_scan_on_the_same_store_skips_an_already_flagged_ticket():
     assert result["at_risk"] == []
     assert result["drafts"] == []
     assert result["decisions"] == []
+
+
+def test_a_replayed_send_checkins_does_not_message_the_customer_twice():
+    """The Chapter 10 membrane rule, applied to the capstone's own effect.
+    `send_checkins` performs N irreversible customer-facing sends in a loop;
+    a crash mid-loop replays the node from the top on resume. The stable
+    `checkin_key` is what makes the second pass a no-op instead of a second
+    message to an already-frustrated customer."""
+    store = InMemoryStore()
+    runtime = Runtime(store=store)
+    state = {
+        "drafts": [{"ticket_id": "T-2001", "message": "original message"}],
+        "decisions": [{"type": "approve"}],
+    }
+    before = len(_SLA_TICKETS.sent)
+
+    send_checkins(state, runtime)
+    send_checkins(state, runtime)  # the replay
+
+    assert len(_SLA_TICKETS.sent) == before + 1

@@ -21,9 +21,23 @@ orchestration logic itself - remove before drain, one replica at a time,
 raise on a drain that never finishes - needs no live fleet to verify."""
 
 import time
+from typing import Callable, Protocol
 
 
-def drain_replica(replica_id: str, load_balancer, max_wait_s: float = 60.0) -> None:
+class LoadBalancer(Protocol):
+    """Minimal surface a rollout script needs from a load balancer client."""
+
+    def remove(self, replica_id: str) -> None: ...
+    def request_drain(self, replica_id: str) -> None: ...
+    def is_drained(self, replica_id: str) -> bool: ...
+    def add(self, replica_id: str) -> None: ...
+
+
+def drain_replica(
+    replica_id: str,
+    load_balancer: LoadBalancer,
+    max_wait_s: float = 60.0,
+) -> None:
     """Take one replica out of rotation, drain it, wait for it to finish."""
     load_balancer.remove(replica_id)  # <1>
     load_balancer.request_drain(replica_id)  # <2>
@@ -34,7 +48,11 @@ def drain_replica(replica_id: str, load_balancer, max_wait_s: float = 60.0) -> N
         raise TimeoutError(f"{replica_id} did not drain within {max_wait_s}s")
 
 
-def rolling_deploy(replica_ids: list[str], load_balancer, deploy_one) -> None:
+def rolling_deploy(
+    replica_ids: list[str],
+    load_balancer: LoadBalancer,
+    deploy_one: Callable[[str], None],
+) -> None:
     """Replace replicas ONE AT A TIME - never more than one out of rotation."""
     for replica_id in replica_ids:
         drain_replica(replica_id, load_balancer)

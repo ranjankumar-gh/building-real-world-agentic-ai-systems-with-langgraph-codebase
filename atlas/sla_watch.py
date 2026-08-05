@@ -72,6 +72,19 @@ def flagged_ns() -> tuple:
     return ("sla_watch", "flagged")
 
 
+def checkin_key(ticket_id: str) -> str:
+    """A stable key for one logical check-in, the same contract as Chapter
+    10's `idempotency_key` for refunds: identical across retries and resumes -
+    never random, never time-based - so a replayed `send_checkins` collapses
+    onto the same key instead of messaging the customer again.
+
+    Scoped to the ticket rather than the thread, because `flagged_ns()` is
+    itself global: one at-risk ticket is one logical check-in no matter which
+    scan drafted it. A refund keys on the thread because the same ticket can
+    legitimately be refunded more than once; an SLA check-in cannot."""
+    return f"checkin:{ticket_id}"
+
+
 def compose_checkin(ticket: dict) -> str:
     """Draft a short, neutral check-in for one at-risk ticket. Referenced by
     "Building SLA Watch by reuse, not rebuild" but not printed there - see
@@ -92,11 +105,23 @@ def scan_tickets(state: SLAWatchState, runtime: Runtime) -> dict:
     return {"at_risk": unflagged}   # <1>
 
 
-def draft_checkins(state: SLAWatchState) -> dict:
+def draft_checkins(state: SLAWatchState, runtime: Runtime) -> dict:
+    """Draft a check-in per at-risk ticket, and claim the ticket as we go.
+
+    The flag is written HERE, not after sending. An approval gate can sit for
+    days (Chapter 11), and the scan runs hourly - flagging only on send would
+    leave a parked ticket unflagged, so every subsequent scan would re-draft
+    it and open another interrupt for the same customer. The flag is a claim
+    on the ticket for the duration of the decision, not a record that a
+    message went out."""
     drafts = [
         {"ticket_id": t["ticket_id"], "message": compose_checkin(t)}
         for t in state["at_risk"]
     ]
+    for draft in drafts:
+        runtime.store.put(
+            flagged_ns(), draft["ticket_id"], {"status": "drafted"}
+        )
     return {"drafts": drafts}
 
 
@@ -108,10 +133,19 @@ def approval_gate(state: SLAWatchState) -> dict:
 def send_checkins(state: SLAWatchState, runtime: Runtime) -> dict:
     for draft, decision in zip(state["drafts"], state["decisions"]):
         if decision["type"] == "reject":
+            # Release the claim `draft_checkins` took, so a rejected ticket
+            # resurfaces on the next scan rather than being silently dropped.
+            runtime.store.delete(flagged_ns(), draft["ticket_id"])
             continue
         message = decision.get("edited_message", draft["message"])   # <2>
-        send_checkin.invoke({"ticket_id": draft["ticket_id"], "message": message})
-        runtime.store.put(flagged_ns(), draft["ticket_id"], {"sent_at": "..."})
+        send_checkin.invoke(
+            {
+                "key": checkin_key(draft["ticket_id"]),   # <3>
+                "ticket_id": draft["ticket_id"],
+                "message": message,
+            }
+        )
+        runtime.store.put(flagged_ns(), draft["ticket_id"], {"status": "sent"})
     return {}
 
 

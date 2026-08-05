@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from atlas.tools import (
+    _SLA_TICKETS,
     KnowledgeBaseUnavailable,
     list_at_risk_tickets,
     lookup_ticket,
@@ -135,11 +136,34 @@ def test_list_at_risk_tickets_returns_nothing_for_an_unreachable_threshold():
 
 
 def test_send_checkin_sends_exactly_one_message_to_one_ticket():
+    _SLA_TICKETS.reset()
     result = send_checkin.invoke(
-        {"ticket_id": "T-2001", "message": "Checking in on your ticket."}
+        {
+            "key": "checkin:T-2001",
+            "ticket_id": "T-2001",
+            "message": "Checking in on your ticket.",
+        }
     )
 
     assert result == "check-in sent for T-2001"
+
+
+def test_send_checkin_is_idempotent_a_repeated_key_does_not_send_again():
+    """Chapter 10's membrane contract, applied to the capstone's own effect:
+    a check-in is an irreversible customer-facing send, so a replayed node
+    must collapse onto the same key rather than messaging twice."""
+    _SLA_TICKETS.reset()
+    payload = {
+        "key": "checkin:T-2001",
+        "ticket_id": "T-2001",
+        "message": "Checking in on your ticket.",
+    }
+
+    first = send_checkin.invoke(payload)
+    second = send_checkin.invoke(payload)
+
+    assert first == second == "check-in sent for T-2001"
+    assert len(_SLA_TICKETS.sent) == 1
 
 
 def test_sla_ticket_backend_is_a_distinct_object_from_ch7s_ticket_dict():

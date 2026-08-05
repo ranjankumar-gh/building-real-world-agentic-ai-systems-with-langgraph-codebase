@@ -3,10 +3,11 @@ discipline (read state, return a delta, decide nothing about what runs next).
 No StateGraph exists yet; that is Chapter 4.
 
 Chapter 7 fills in `classify` for real (atlas.triage), so `triage` here no
-longer propagates a NotImplementedError when called unmocked - `retrieve`
-still does, via the still-stubbed `search_kb`."""
+longer propagates a NotImplementedError when called unmocked. `retrieve`
+reaches the same chapter's knowledge-base tool through `atlas.helpers`."""
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from atlas import graph_sketch
 from atlas.graph_sketch import (
@@ -65,8 +66,11 @@ def test_answer_calls_compose_answer_and_wraps_its_result_in_a_delta(monkeypatch
     assert delta == {"messages": ["reply"]}
 
 
-def test_retrieve_propagates_the_search_kb_stub_which_is_still_unfilled():
-    """classify went real in Chapter 7 (see atlas/triage.py); search_kb has
-    not - atlas/helpers.py's stub still raises NotImplementedError."""
-    with pytest.raises(NotImplementedError):
-        retrieve(_state(messages=["hi"]))
+def test_retrieve_returns_a_retrieved_delta_from_the_real_knowledge_base():
+    """classify went real in Chapter 7 (see atlas/triage.py); `search_kb` is
+    now the adapter onto that chapter's tool, so the whiteboard's retrieve
+    node returns a real delta instead of raising."""
+    delta = retrieve(_state(messages=[HumanMessage("what is the refund window?")]))
+
+    assert delta["retrieved"]
+    assert "30 days" in delta["retrieved"][0]["text"]
