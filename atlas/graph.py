@@ -37,10 +37,11 @@ holds; structured output narrows the input, it does not dissolve the
 boundary). `search_kb` also went real in that chapter, as a `@tool` in
 `atlas/tools.py` - along with `KnowledgeBaseUnavailable`, imported from
 there now instead of atlas.helpers - but `retrieve` and `answer` below are
-not yet rewired to call it: that integration (folding a tool-calling agent
-into this graph) is deferred to a later chapter, so `retrieve`/`answer`
-still call the atlas.helpers stubs for `search_kb`/`compose_answer` shape
-continuity until then. See atlas/helpers.py's module docstring.
+not yet rewired to call it: `answer` is an injectable seam via
+`build_graph(resolve_node=...)` so a middleware-equipped agent can be mounted
+there; see Chapter 17's mounting section for the pattern. Until a custom node
+is mounted, `answer` calls the atlas.helpers stub for `compose_answer` shape
+continuity. See atlas/helpers.py's module docstring.
 
 Chapter 9, "Persistence and Checkpointing", compiles `graph` onto a
 checkpointer so state survives past a single `invoke` call. `InMemorySaver`
@@ -350,11 +351,15 @@ def research(state: AtlasState) -> dict:
     return {"messages": [summarize_findings(out["findings"])]}
 
 
-def _make_builder(triage_node) -> StateGraph:
+def _make_builder(
+    triage_node, resolve_node=answer
+) -> StateGraph:
     """Chapter 21, "Testing non-determinism": the wiring shared by the
     module-level `builder` below and every fixture graph `build_graph`
     constructs - the exact same Chapter 6-17 topology, parameterized only on
-    which triage callable is wired in for the "triage" node."""
+    which triage callable is wired in for the "triage" node. Chapter 21 adds
+    the `resolve_node` seam for mounting a middleware-equipped agent in the
+    answering position; see Chapter 17's mounting section for the pattern."""
     b = StateGraph(AtlasState)
     b.add_node("triage", triage_node)
     b.add_node(
@@ -365,7 +370,7 @@ def _make_builder(triage_node) -> StateGraph:
         # side-effecting node without the discipline Chapter 10 covers.
         retry_policy=RetryPolicy(max_attempts=3, retry_on=(ConnectionError,)),
     )
-    b.add_node("answer", answer)
+    b.add_node("answer", resolve_node)
     b.add_node("escalate", escalate)
     # Chapter 11: the approval gate - no retry_policy, no side effect. It
     # only interrupts and routes; retrying a suspended interrupt is not the
@@ -411,7 +416,7 @@ def _make_builder(triage_node) -> StateGraph:
     return b
 
 
-def build_graph(model=None):
+def build_graph(model=None, resolve_node=None):
     """Chapter 21, "Testing non-determinism: replaying a checkpoint": factor
     the model out to a parameter, the way `create_agent` already takes one,
     instead of the module-level `classify` every node closes over. `model=
@@ -432,7 +437,9 @@ def build_graph(model=None):
             route = ai.content if ai.content in ALLOWED_ROUTES else "escalate"
             return {"route": route}
 
-    return _make_builder(triage_node).compile(
+    return _make_builder(
+        triage_node, resolve_node=resolve_node or answer
+    ).compile(
         checkpointer=InMemorySaver(), store=InMemoryStore()
     )
 

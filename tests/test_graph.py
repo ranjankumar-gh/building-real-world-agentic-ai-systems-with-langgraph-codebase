@@ -55,6 +55,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
 from atlas import graph as graph_module
+from atlas.breaks import ScriptedModel
 from atlas.effects import RefundError
 from atlas.graph import (
     ALLOWED_ROUTES,
@@ -63,6 +64,7 @@ from atlas.graph import (
     AtlasState,
     answer,
     approval_gate,
+    build_graph,
     derive_sources,
     escalate,
     graph,
@@ -813,6 +815,26 @@ def test_research_is_registered_as_a_node_but_not_wired_into_any_edge():
     graph_edges = graph.get_graph().edges
     assert not any(edge.source == "research" or edge.target == "research"
                    for edge in graph_edges)
+
+
+def test_build_graph_mounts_a_custom_resolve_node() -> None:
+    """The answering node is a seam: pass one in and the graph uses it."""
+    seen: list[str] = []
+
+    def fake_resolve(state: AtlasState) -> dict:
+        seen.append("called")
+        return {"messages": [AIMessage("from the mounted node")]}
+
+    graph = build_graph(
+        model=ScriptedModel([AIMessage("answer")]),
+        resolve_node=fake_resolve,
+    )
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "hello"}], "retrieved": []},
+        {"configurable": {"thread_id": "test-a1"}},
+    )
+    assert seen == ["called"]
+    assert result["messages"][-1].content == "from the mounted node"
 
 
 def test_atlas_answers_a_knowledge_base_question_end_to_end(monkeypatch):
