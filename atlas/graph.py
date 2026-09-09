@@ -353,7 +353,9 @@ def research(state: AtlasState) -> dict:
     return {"messages": [summarize_findings(out["findings"])]}
 
 
-def _make_builder(triage_node, resolve_node: Callable[[AtlasState], dict] = answer) -> StateGraph:
+def _make_builder(
+    triage_node, resolve_node: Callable[[AtlasState], dict] = answer
+) -> StateGraph:
     """Chapter 21, "Testing non-determinism": the wiring shared by the
     module-level `builder` below and every fixture graph `build_graph`
     constructs - the exact same Chapter 6-17 topology, parameterized only on
@@ -416,7 +418,9 @@ def _make_builder(triage_node, resolve_node: Callable[[AtlasState], dict] = answ
     return b
 
 
-def build_graph(model=None, resolve_node: Callable[[AtlasState], dict] | None = None) -> Pregel:
+def build_graph(
+    model=None, resolve_node: Callable[[AtlasState], dict] | None = None
+) -> Pregel:
     """Chapter 21, "Testing non-determinism: replaying a checkpoint": factor
     the model out to a parameter, the way `create_agent` already takes one,
     instead of the module-level `classify` every node closes over. `model=
