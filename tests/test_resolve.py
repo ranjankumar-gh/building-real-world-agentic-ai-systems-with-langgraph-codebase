@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from atlas.breaks import ScriptedModel
-from atlas.graph import build_graph
+from atlas.graph import answer, build_graph
 from atlas.resolve import make_resolve_node
 from atlas.state import AtlasState
 
@@ -99,3 +99,20 @@ def test_middleware_runs_when_the_agent_is_mounted_in_the_graph() -> None:
     )
 
     assert fired == ["wrap_model_call"]
+
+
+def test_build_resolved_graph_mounts_the_real_middleware_stack() -> None:
+    """The production assembly, in the package rather than in a test."""
+    from atlas.resolve import build_resolved_graph
+
+    graph = build_resolved_graph()
+
+    assert "answer" in graph.nodes
+    node = graph.nodes["answer"]
+    assert node is not None
+    # Not just presence: the compiled node's own callable proves "answer"
+    # runs make_resolve_node's wrapper around the mounted agent, not
+    # atlas.graph.answer, the deterministic stub - with no model invoked.
+    wrapped = node.node.steps[0].func
+    assert wrapped is not answer
+    assert wrapped.__qualname__ == "make_resolve_node.<locals>.resolve"

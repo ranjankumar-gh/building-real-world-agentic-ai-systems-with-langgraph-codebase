@@ -15,13 +15,24 @@ input length below is safe, not an assumption.
 
 Kept out of atlas/graph.py on purpose: importing the agent constructs a
 chat model, and the default graph is model-free so the offline suite and a
-reader with no API key both still get a working answer path."""
+reader with no API key both still get a working answer path.
+
+`build_resolved_graph`, below, is the production assembly: the one call a
+reader runs to get Atlas's topology with the full `RESOLVE_MIDDLEWARE` stack
+mounted in the answering position, via `make_resolve_node`. Its import of
+`atlas.agent` is inside the function, not at module level, for the same
+reason `atlas/graph.py`'s `answer` stays the default node - constructing
+`resolve_agent` builds a chat model, and hoisting that import to the top of
+this module would make every importer of `atlas.resolve` (including the
+offline tests above) pay that cost too."""
 
 from collections.abc import Callable
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.pregel import Pregel
 
+from atlas.graph import build_graph
 from atlas.state import AtlasState
 
 
@@ -40,3 +51,16 @@ def make_resolve_node(agent: CompiledStateGraph) -> Callable[[AtlasState], dict]
         return {"messages": new}
 
     return resolve
+
+
+def build_resolved_graph() -> Pregel:
+    """Atlas's topology with the full middleware stack mounted in the
+    answering position. This is the production assembly: the seam exists so
+    the default graph can stay model-free, and this is the call that fills
+    it. Chapter 17, "Mounting the resolve agent"."""
+    # Imported here, not at module level - see the module docstring. Every
+    # offline test that only needs make_resolve_node must not pay the cost
+    # of atlas.agent constructing a chat model at import time.
+    from atlas.agent import resolve_agent
+
+    return build_graph(resolve_node=make_resolve_node(resolve_agent))
