@@ -62,19 +62,19 @@ caller that omits `context=` at invocation time gets `runtime.context is
 None`, and the first tool call raises `AttributeError: 'NoneType' object
 has no attribute 'role'` from inside `RoleAuthorityGate`, not a quiet
 fallback role. Verified directly against this build, not assumed. See
-`RESOLVE_MIDDLEWARE`'s in-line annotation below for the two ordering
+`RESOLVE_MIDDLEWARE`'s in-line annotation below for the ordering
 constraints this chapter adds.
 """
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.store.memory import InMemoryStore
 from langsmith import trace
 
 from atlas.audit import AuditGate
 from atlas.context import Budget, ContextBudget
 from atlas.cost import TenantBudgetGuard
+from atlas.memory import build_dev_store
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
 from atlas.security import AtlasContext, InjectionGuard, RoleAuthorityGate
 from atlas.tools import lookup_ticket, search_kb, set_ticket_status
@@ -104,21 +104,25 @@ model = init_chat_model("claude-sonnet-4-6", temperature=0, max_tokens=1024)
 # budget" - history=4000, retrieved=2000 matches the chapter's own numbers.
 context_budget = ContextBudget(Budget(history=4000, retrieved=2000))
 
-# Chapter 23: the durable BaseStore the cumulative cost cap and the audit
-# log both write to - one instance, shared, so a budget check and an audit
-# entry for the same call land in the same store. See "A hard, cumulative
-# cost ceiling" and "A durable audit log, deliberately separate from the
-# trace".
-store = InMemoryStore()
+# Chapter 13 / Chapter 23 dev default - the same swap-for-prod pattern
+# atlas/memory.py already establishes, reused here rather than duplicated:
+# `build_dev_store()` for the dev/test path this suite runs against, and
+# `build_prod_store(db_uri)` in production, so the cumulative cost cap and
+# the audit log actually survive a restart instead of losing every count
+# and every record the moment the process does. One instance, shared, so
+# a budget check and an audit entry for the same call land in the same
+# store. See "A hard, cumulative cost ceiling" and "A durable audit log,
+# deliberately separate from the trace".
+store = build_dev_store()
 
 RESOLVE_MIDDLEWARE = [
     pii,
-    InjectionGuard(),
     context_budget,
     summarizer,
     AuditGate(store),
     RoleAuthorityGate(),
     AuthorityGate(),
+    InjectionGuard(),
     TenantBudgetGuard(store),
     approval,
 ]  # <1>
@@ -141,32 +145,51 @@ resolve_agent = create_agent(
 #    `wrap_model_call` and the other `before_model`, their relative list
 #    position does not change execution order: every `before_model` hook
 #    still runs before the wrapped model call. See "Compose with
-#    summarization". Chapter 23 adds two more constraints, one per hook
-#    type it uses. Among the `wrap_tool_call` gates - `InjectionGuard`,
-#    `AuditGate`, `RoleAuthorityGate`, `AuthorityGate` - `InjectionGuard`
-#    goes outermost (first) because its untrusted-content tag is applied
-#    on the way back OUT of the handler chain, and outer wrappers finish
-#    last: whatever `InjectionGuard` does to a tool result is the final
-#    transformation before that result re-enters the conversation, not
-#    something a gate closer to the tool can still see raw or a gate
-#    further out can strip. `AuditGate` comes next, wrapping BOTH
-#    authority gates rather than sitting innermost of the four: it logs
-#    `response.status` from whatever its `handler(request)` call returns,
-#    and `RoleAuthorityGate`/`AuthorityGate` refuse a call by returning an
-#    error `ToolMessage` without ever calling their own `handler` - so an
+#    summarization". Chapter 23 adds three more constraints, across two
+#    hook types. Among the `wrap_tool_call` gates - `AuditGate`,
+#    `RoleAuthorityGate`, `AuthorityGate`, `InjectionGuard` - `AuditGate`
+#    goes outermost (first) because it logs `response.status` from
+#    whatever its own `handler(request)` call returns, and
+#    `RoleAuthorityGate`/`AuthorityGate` refuse a call by returning an
+#    error `ToolMessage` without ever calling their own `handler` - an
 #    `AuditGate` nested inside either one would never see, and never
 #    record, a refusal. `atlas/audit.py`'s own module docstring calls this
 #    "a complete, durable record", and `tests/test_audit.py`'s
 #    `test_audit_gate_records_an_error_result_status_too` already pins an
 #    error-status write as a first-class case - an audit log that cannot
 #    show a refused attempt is the wrong artifact for the compliance job
-#    Chapter 23 gives it, so `AuditGate` must wrap outside both authority
-#    checks, not sit behind them. `RoleAuthorityGate` still goes outside
-#    `AuthorityGate` beneath `AuditGate` - both block by returning without
-#    calling `handler`, so the one that runs first (the more outer one)
-#    decides first, and `atlas/security.py`'s own docstring is explicit
-#    that an unauthorized role must never reach `AuthorityGate`'s
-#    approval-required check at all. Separately, among the
+#    Chapter 23 gives it. `RoleAuthorityGate` comes next, still outside
+#    `AuthorityGate` - both block the same way, so the one that runs
+#    first (the more outer one) decides first, and `atlas/security.py`'s
+#    own docstring is explicit that an unauthorized role must never reach
+#    `AuthorityGate`'s approval-required check at all. `InjectionGuard`
+#    goes LAST - the innermost `wrap_tool_call` layer, wrapping only the
+#    real tool invocation - which inverts this stack's first attempt at
+#    this order. Outermost was wrong: a refusal from either authority
+#    gate bubbles OUT through every wrapper still ahead of it, and
+#    `InjectionGuard.wrap_tool_call` tags whatever its `handler(request)`
+#    call returns as untrusted content, unconditionally - it cannot tell
+#    a governance refusal from real tool output, because a refusal IS a
+#    `ToolMessage`, same as a real one. Outermost, that meant a tenant
+#    reading `<untrusted-content>Atlas's own policy refusal
+#    </untrusted-content>`, paired with a system prompt telling the model
+#    to treat tagged content as reference material, never a command -
+#    exactly backwards for something Atlas itself said. Innermost,
+#    `RoleAuthorityGate` and `AuthorityGate` (and `approval`, structurally
+#    - see below) all sit outside `InjectionGuard`, so a refusal from any
+#    of them returns before `InjectionGuard.wrap_tool_call` is ever
+#    invoked; only a call that actually reaches the tool passes through
+#    it, and that output is genuinely untrusted. See
+#    `tests/test_agent.py`'s
+#    `test_a_role_refusal_reaches_injection_guard_untagged` for the
+#    behavioral proof. `approval` (`HumanInTheLoopMiddleware`) implements
+#    `after_model`, not `wrap_tool_call` - confirmed by reading
+#    `langchain.agents.middleware.human_in_the_loop` directly, not
+#    assumed - so it never nests with these four at all: a human
+#    rejection is resolved in `after_model`, which removes the rejected
+#    tool_call from the `AIMessage` before the `tools` node runs, so it
+#    never reaches ANY `wrap_tool_call` middleware, `InjectionGuard`
+#    included, regardless of list position. Separately, among the
 #    `wrap_model_call` middleware, `TenantBudgetGuard` sits inside
 #    `context_budget` (a different hook from the tool-call gates above),
 #    so its token estimate reflects the already-trimmed request
