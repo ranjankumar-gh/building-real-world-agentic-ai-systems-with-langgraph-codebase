@@ -1,8 +1,10 @@
 """Chapter 17: the resolve agent mounted into Atlas's topology."""
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -10,10 +12,20 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from atlas import agent as agent_module
+from atlas import graph as graph_module
 from atlas.breaks import ScriptedModel
-from atlas.graph import answer, build_graph
+from atlas.graph import build_graph
 from atlas.resolve import make_resolve_node
 from atlas.state import AtlasState
+
+
+def _decision(route: str) -> SimpleNamespace:
+    """Stand-in for a validated TriageResult - just enough shape (`.route`)
+    for `triage` to read, without a live model call. Same helper shape as
+    tests/test_graph.py's `_decision`, kept local rather than imported since
+    no conftest.py shares fixtures across test modules in this repo."""
+    return SimpleNamespace(route=route)
 
 
 class FakeChatModel(BaseChatModel):
@@ -101,18 +113,31 @@ def test_middleware_runs_when_the_agent_is_mounted_in_the_graph() -> None:
     assert fired == ["wrap_model_call"]
 
 
-def test_build_resolved_graph_mounts_the_real_middleware_stack() -> None:
-    """The production assembly, in the package rather than in a test."""
+def test_build_resolved_graph_runs_the_mounted_agent_not_the_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production assembly, in the package rather than in a test - and a
+    behavioural proof rather than an internals inspection. Force triage to
+    route to "answer" the same way tests/test_graph.py already does for
+    `classify`, substitute a fake for `resolve_agent` before
+    `build_resolved_graph()`'s lazy `from atlas.agent import resolve_agent`
+    ever runs, then invoke the compiled graph for real: the fake recording a
+    call and its reply landing in the final state is what "the answering
+    node is the mounted agent, not atlas.graph.answer's deterministic stub"
+    actually looks like at runtime. No model is constructed or invoked."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
+    agent = FakeAgent()
+    monkeypatch.setattr(agent_module, "resolve_agent", agent)
+
     from atlas.resolve import build_resolved_graph
 
     graph = build_resolved_graph()
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "hi"}], "retrieved": []},
+        {"configurable": {"thread_id": "test-a7"}},
+    )
 
-    assert "answer" in graph.nodes
-    node = graph.nodes["answer"]
-    assert node is not None
-    # Not just presence: the compiled node's own callable proves "answer"
-    # runs make_resolve_node's wrapper around the mounted agent, not
-    # atlas.graph.answer, the deterministic stub - with no model invoked.
-    wrapped = node.node.steps[0].func
-    assert wrapped is not answer
-    assert wrapped.__qualname__ == "make_resolve_node.<locals>.resolve"
+    assert agent.calls  # the mounted agent ran - not the deterministic stub
+    assert result["messages"][-1].content == "resolved"
