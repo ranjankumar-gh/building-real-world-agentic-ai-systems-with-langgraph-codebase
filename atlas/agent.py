@@ -72,6 +72,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langsmith import trace
 
 from atlas.audit import AuditGate
+from atlas.containment import RevocationGate
 from atlas.context import Budget, ContextBudget
 from atlas.cost import TenantBudgetGuard
 from atlas.memory import build_dev_store
@@ -116,6 +117,7 @@ context_budget = ContextBudget(Budget(history=4000, retrieved=2000))
 store = build_dev_store()
 
 RESOLVE_MIDDLEWARE = [
+    RevocationGate(store),
     pii,
     context_budget,
     summarizer,
@@ -194,6 +196,14 @@ resolve_agent = create_agent(
 #    `context_budget` (a different hook from the tool-call gates above),
 #    so its token estimate reflects the already-trimmed request
 #    `context_budget` hands it, not the raw pre-trim history.
+#    `RevocationGate` goes FIRST - outside every other `wrap_model_call`
+#    entry (`context_budget`, `TenantBudgetGuard`) and every
+#    `wrap_tool_call` gate too - because it wraps the whole "model" node
+#    from the outermost position, not from within any of the constraints
+#    argued above. A revoked subject must never reach `context_budget`'s
+#    trim, `TenantBudgetGuard`'s spend write, or `AuditGate`'s record -
+#    see `atlas/containment.py`'s own module docstring for why it raises,
+#    rather than degrading like `TenantBudgetGuard`, once revoked.
 # 2. `RoleAuthorityGate.wrap_tool_call` reads `request.runtime.context.role`
 #    and `AuditGate.wrap_tool_call` reads `request.runtime.context.customer_id`
 #    (and `.role`) - both need `context_schema=` so `create_agent` populates

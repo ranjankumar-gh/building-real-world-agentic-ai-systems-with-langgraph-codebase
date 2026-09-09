@@ -232,9 +232,15 @@ def test_resolve_stack_carries_the_security_middleware_in_argued_order():
     the already-trimmed per-call request, not the raw pre-trim history.
     context_budget is an instance, not a class with one name in `names`,
     so this compares positions by identity via RESOLVE_MIDDLEWARE.index
-    rather than by name."""
+    rather than by name.
+
+    RevocationGate must sit at index 0, outside every other entry here -
+    it wraps the whole "model" node (see atlas/containment.py), so a
+    revoked subject must never reach context_budget's trim,
+    TenantBudgetGuard's spend write, or AuditGate's record."""
     names = [type(m).__name__ for m in RESOLVE_MIDDLEWARE]
 
+    assert names[0] == "RevocationGate"
     assert "InjectionGuard" in names
     assert "RoleAuthorityGate" in names
     assert "TenantBudgetGuard" in names
