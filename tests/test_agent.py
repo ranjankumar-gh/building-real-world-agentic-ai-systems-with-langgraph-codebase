@@ -27,6 +27,7 @@ from langchain_core.tools import tool
 
 from atlas import agent as agent_module
 from atlas.agent import (
+    RESOLVE_MIDDLEWARE,
     RESOLVE_PROMPT,
     RESOLVE_TOOLS,
     build_resolve_agent,
@@ -188,3 +189,30 @@ def test_run_resolve_requires_route_thread_id_and_customer_id_in_configurable(
 
     with pytest.raises(KeyError):
         run_resolve({"messages": []}, {"configurable": {}})
+
+
+# --- Chapter 23: the security/cost/audit stack, in argued order ------------
+
+
+def test_resolve_stack_carries_the_security_middleware_in_argued_order():
+    """Chapter 23: order is a security control, not a style choice.
+
+    `resolve_agent` is a compiled `CompiledStateGraph` with no readable
+    `middleware` attribute on langgraph==1.2.6, so this asserts against
+    `RESOLVE_MIDDLEWARE`, the list actually passed to `create_agent` -
+    the two are the same list by construction (see atlas/agent.py).
+    InjectionGuard must wrap outside every other wrap_tool_call gate,
+    including Ch8's own AuthorityGate, so its untrusted-content tag is
+    the last transformation applied before a tool result re-enters the
+    conversation the model reasons over next. RoleAuthorityGate must
+    likewise sit outside AuthorityGate, so an unauthorized role is
+    blocked before AuthorityGate's own approval check ever runs."""
+    names = [type(m).__name__ for m in RESOLVE_MIDDLEWARE]
+
+    assert "InjectionGuard" in names
+    assert "RoleAuthorityGate" in names
+    assert "TenantBudgetGuard" in names
+    assert "AuditGate" in names
+    assert names.index("InjectionGuard") < names.index("RoleAuthorityGate")
+    assert names.index("InjectionGuard") < names.index("AuthorityGate")
+    assert names.index("RoleAuthorityGate") < names.index("AuthorityGate")
