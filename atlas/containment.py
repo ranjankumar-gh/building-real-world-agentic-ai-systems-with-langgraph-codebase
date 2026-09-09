@@ -21,9 +21,12 @@ def revocation_ns(subject: str) -> tuple:
 
 
 def revoke(store: BaseStore, subject: str, reason: str) -> None:
-    """Take back authority already granted. Durable and one-way: nothing in
-    this module reinstates it, because reinstatement is a human decision
-    made outside the run that tripped."""
+    """Take back authority already granted, persisted with whatever
+    durability the caller's store provides - gone on restart with
+    `atlas/memory.py`'s dev-default `build_dev_store()`, durable across
+    one with `build_prod_store(db_uri)` in production. One-way in either
+    case: nothing in this module reinstates a revocation, because
+    reinstatement is a human decision made outside the run that tripped."""
     store.put(
         revocation_ns(subject),
         "revocation",
