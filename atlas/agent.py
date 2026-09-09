@@ -116,10 +116,10 @@ RESOLVE_MIDDLEWARE = [
     InjectionGuard(),
     context_budget,
     summarizer,
+    AuditGate(store),
     RoleAuthorityGate(),
     AuthorityGate(),
     TenantBudgetGuard(store),
-    AuditGate(store),
     approval,
 ]  # <1>
 
@@ -143,26 +143,34 @@ resolve_agent = create_agent(
 #    still runs before the wrapped model call. See "Compose with
 #    summarization". Chapter 23 adds two more constraints, one per hook
 #    type it uses. Among the `wrap_tool_call` gates - `InjectionGuard`,
-#    `RoleAuthorityGate`, `AuthorityGate`, `AuditGate` - `InjectionGuard`
+#    `AuditGate`, `RoleAuthorityGate`, `AuthorityGate` - `InjectionGuard`
 #    goes outermost (first) because its untrusted-content tag is applied
 #    on the way back OUT of the handler chain, and outer wrappers finish
 #    last: whatever `InjectionGuard` does to a tool result is the final
 #    transformation before that result re-enters the conversation, not
 #    something a gate closer to the tool can still see raw or a gate
-#    further out can strip. `RoleAuthorityGate` comes next, still outside
-#    `AuthorityGate` - both block by returning without calling `handler`,
-#    so the one that runs first (the more outer one) decides first, and
-#    `atlas/security.py`'s own docstring is explicit that an unauthorized
-#    role must never reach `AuthorityGate`'s approval-required check at
-#    all. `AuditGate` sits innermost of the four, closest to the real
-#    tool call - which means a call either gate blocks never reaches it,
-#    a real gap between "records every tool call" (its own docstring) and
-#    what this order actually audits, flagged here rather than silently
-#    accepted. Separately, among the `wrap_model_call` middleware,
-#    `TenantBudgetGuard` sits inside `context_budget` (a different hook
-#    from the tool-call gates above), so its token estimate reflects the
-#    already-trimmed request `context_budget` hands it, not the raw
-#    pre-trim history.
+#    further out can strip. `AuditGate` comes next, wrapping BOTH
+#    authority gates rather than sitting innermost of the four: it logs
+#    `response.status` from whatever its `handler(request)` call returns,
+#    and `RoleAuthorityGate`/`AuthorityGate` refuse a call by returning an
+#    error `ToolMessage` without ever calling their own `handler` - so an
+#    `AuditGate` nested inside either one would never see, and never
+#    record, a refusal. `atlas/audit.py`'s own module docstring calls this
+#    "a complete, durable record", and `tests/test_audit.py`'s
+#    `test_audit_gate_records_an_error_result_status_too` already pins an
+#    error-status write as a first-class case - an audit log that cannot
+#    show a refused attempt is the wrong artifact for the compliance job
+#    Chapter 23 gives it, so `AuditGate` must wrap outside both authority
+#    checks, not sit behind them. `RoleAuthorityGate` still goes outside
+#    `AuthorityGate` beneath `AuditGate` - both block by returning without
+#    calling `handler`, so the one that runs first (the more outer one)
+#    decides first, and `atlas/security.py`'s own docstring is explicit
+#    that an unauthorized role must never reach `AuthorityGate`'s
+#    approval-required check at all. Separately, among the
+#    `wrap_model_call` middleware, `TenantBudgetGuard` sits inside
+#    `context_budget` (a different hook from the tool-call gates above),
+#    so its token estimate reflects the already-trimmed request
+#    `context_budget` hands it, not the raw pre-trim history.
 # 2. `RoleAuthorityGate.wrap_tool_call` reads `request.runtime.context.role`
 #    and `AuditGate.wrap_tool_call` reads `request.runtime.context.customer_id`
 #    (and `.role`) - both need `context_schema=` so `create_agent` populates

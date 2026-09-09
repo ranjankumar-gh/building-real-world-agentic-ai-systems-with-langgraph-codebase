@@ -206,7 +206,13 @@ def test_resolve_stack_carries_the_security_middleware_in_argued_order():
     the last transformation applied before a tool result re-enters the
     conversation the model reasons over next. RoleAuthorityGate must
     likewise sit outside AuthorityGate, so an unauthorized role is
-    blocked before AuthorityGate's own approval check ever runs."""
+    blocked before AuthorityGate's own approval check ever runs.
+    AuditGate must wrap outside BOTH authority gates - not sit innermost
+    of the four - so a call either one refuses still reaches AuditGate's
+    handler(request) call and gets logged with result_status="error",
+    the same refusal tests/test_audit.py's own
+    test_audit_gate_records_an_error_result_status_too already expects
+    an AuditGate built in isolation to capture."""
     names = [type(m).__name__ for m in RESOLVE_MIDDLEWARE]
 
     assert "InjectionGuard" in names
@@ -216,3 +222,5 @@ def test_resolve_stack_carries_the_security_middleware_in_argued_order():
     assert names.index("InjectionGuard") < names.index("RoleAuthorityGate")
     assert names.index("InjectionGuard") < names.index("AuthorityGate")
     assert names.index("RoleAuthorityGate") < names.index("AuthorityGate")
+    assert names.index("AuditGate") < names.index("RoleAuthorityGate")
+    assert names.index("AuditGate") < names.index("AuthorityGate")
