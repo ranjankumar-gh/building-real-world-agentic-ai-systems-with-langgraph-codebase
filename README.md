@@ -40,6 +40,11 @@ without one - they are not required for the rest of the suite to pass.
   already in this repo's `pyproject.toml`). Its test is skip-guarded behind
   `ATLAS_POSTGRES_TEST_DSN`; set it to a reachable Postgres connection string (for example
   `postgresql://atlas:atlas@localhost:5432/atlas`) to exercise it, otherwise it skips cleanly.
+  Before that test can pass against a fresh database, run the schema migration once:
+  `uv run python scripts/setup_checkpointer.py`. That is the chapter's own rule in practice -
+  `.setup()` is a migration, so `run_durable` never calls it. On Windows the script also selects a
+  selector event loop, because psycopg's async driver refuses the default `ProactorEventLoop`;
+  your own code calling `run_durable` there needs the same two lines.
 - **Chapter 10, Durable Execution, Long-Running Workflows, and State Migration.** Atlas's first
   crossing of the checkpoint membrane: `atlas/effects.py` (new) holds the stable idempotency key
   and the idempotent `charge_refund` operation; `atlas/graph.py`'s `refund` node calls them and

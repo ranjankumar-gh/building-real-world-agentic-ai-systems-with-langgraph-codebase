@@ -246,8 +246,43 @@ def test_resume_approval_resumes_the_same_thread_and_completes_the_refund(
 def test_run_durable_persists_to_a_real_postgres_backend(monkeypatch):
     """"Swap to a durable backend": the same graph, compiled onto
     AsyncPostgresSaver, actually round-trips a turn through a live Postgres
-    instance. Skipped by default - see `requires_postgres` above."""
+    instance AND leaves it there. Skipped by default - see `requires_postgres`
+    above.
+
+    Two things this test learned the hard way, the first time it was run
+    against a real database rather than skipped:
+
+    1. `scripts/setup_checkpointer.py` has to have run first. Ch9's own
+       production-considerations rule is that `.setup()` is a migration and
+       never runs from the application, so `run_durable` correctly does not
+       call it - which means a fresh database has no `checkpoints` table and
+       the invoke fails with UndefinedTable. Running the migration here is
+       what a deploy step does for you in production.
+    2. On Windows the default event loop is the ProactorEventLoop, and
+       psycopg's async driver refuses it outright with InterfaceError before
+       it opens a connection. `use_selector_event_loop()` is the same shim
+       the migration script uses, and it is a no-op off Windows.
+
+    The final assertion reopens a SEPARATE saver and reads the thread back.
+    Asserting on `run_durable`'s return value alone would pass just as well
+    against an in-memory checkpointer, which would make a test named
+    "persists to a real Postgres backend" prove nothing about persistence.
+
+    The thread id is per-run, and that is the third thing this test learned.
+    A fixed id read back 6 messages on the third run rather than 2, because
+    Postgres had kept the previous two runs - the durability the test exists
+    to prove is exactly what makes a hardcoded id non-deterministic here.
+    Every other test in this file can reuse a fixed id safely because
+    InMemorySaver starts empty each session."""
     import asyncio
+    import uuid
+
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    from scripts.setup_checkpointer import (
+        create_checkpoint_tables,
+        use_selector_event_loop,
+    )
 
     monkeypatch.setattr(
         graph_module, "classify", lambda messages: _decision("answer")
@@ -257,12 +292,23 @@ def test_run_durable_persists_to_a_real_postgres_backend(monkeypatch):
         graph_module, "compose_answer", lambda messages, retrieved: "reply"
     )
 
+    use_selector_event_loop()
     dsn = os.environ["ATLAS_POSTGRES_TEST_DSN"]
-    config = {"configurable": {"thread_id": "test-thread-postgres"}}
+    config = {"configurable": {"thread_id": f"test-thread-postgres-{uuid.uuid4()}"}}
 
+    asyncio.run(create_checkpoint_tables(dsn))  # the deploy step, run once
     result = asyncio.run(run_durable("I need a refund.", config, db_uri=dsn))
 
     assert result["route"] == "answer"
+
+    async def reread_from_a_fresh_connection() -> int:
+        async with AsyncPostgresSaver.from_conn_string(dsn) as checkpointer:
+            reopened = graph_module.builder.compile(checkpointer=checkpointer)
+            snapshot = await reopened.aget_state(config)
+            return len(snapshot.values["messages"])
+
+    # The turn is still in Postgres after the connection that wrote it closed.
+    assert asyncio.run(reread_from_a_fresh_connection()) == 2
 
 
 # --- Chapter 17: subgraphs, parallelism, and map-reduce --------------------
