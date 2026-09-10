@@ -234,10 +234,15 @@ def test_resolve_stack_carries_the_security_middleware_in_argued_order():
     so this compares positions by identity via RESOLVE_MIDDLEWARE.index
     rather than by name.
 
-    RevocationGate must sit at index 0, outside every other entry here -
-    it wraps the whole "model" node (see atlas/containment.py), so a
-    revoked subject must never reach context_budget's trim,
-    TenantBudgetGuard's spend write, or AuditGate's record."""
+    RevocationGate must sit at index 0. That makes it the outermost of
+    the three wrap_model_call entries, so a revoked subject never reaches
+    context_budget's trim or TenantBudgetGuard's spend write. It does not
+    nest with the wrap_tool_call gates - it has no wrap_tool_call method -
+    and AuditGate writes no record for a revoked subject because raising
+    inside the "model" node means the "tools" node is never reached, which
+    is node order rather than list position. Index 0 buys nothing against
+    the before_model hooks (pii, summarizer); those run before any wrapped
+    model call wherever the list puts them."""
     names = [type(m).__name__ for m in RESOLVE_MIDDLEWARE]
 
     assert names[0] == "RevocationGate"

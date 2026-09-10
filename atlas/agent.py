@@ -196,14 +196,22 @@ resolve_agent = create_agent(
 #    `context_budget` (a different hook from the tool-call gates above),
 #    so its token estimate reflects the already-trimmed request
 #    `context_budget` hands it, not the raw pre-trim history.
-#    `RevocationGate` goes FIRST - outside every other `wrap_model_call`
-#    entry (`context_budget`, `TenantBudgetGuard`) and every
-#    `wrap_tool_call` gate too - because it wraps the whole "model" node
-#    from the outermost position, not from within any of the constraints
-#    argued above. A revoked subject must never reach `context_budget`'s
-#    trim, `TenantBudgetGuard`'s spend write, or `AuditGate`'s record -
-#    see `atlas/containment.py`'s own module docstring for why it raises,
-#    rather than degrading like `TenantBudgetGuard`, once revoked.
+#    `RevocationGate` goes FIRST, and it is worth being exact about what
+#    that does and does not mean, since the nesting rule only governs
+#    middleware sharing a hook. Index 0 makes it the outermost of the
+#    three `wrap_model_call` entries (itself, `context_budget`,
+#    `TenantBudgetGuard`), so a revoked subject never reaches
+#    `context_budget`'s trim or `TenantBudgetGuard`'s spend write. It does
+#    NOT nest with the `wrap_tool_call` gates - it has no `wrap_tool_call`
+#    method and never participates in that composition. `AuditGate` writes
+#    no record for a revoked subject because raising inside the "model"
+#    node means the "tools" node is never reached at all, which is node
+#    order, not list position. And index 0 buys nothing against
+#    `before_model`: `pii` and `summarizer` run before any wrapped model
+#    call regardless of where the list puts them, so a revoked run still
+#    pays one redaction pass and, past its threshold, one summarization
+#    call. See `atlas/containment.py`'s own module docstring for why it
+#    raises, rather than degrading like `TenantBudgetGuard`, once revoked.
 # 2. `RoleAuthorityGate.wrap_tool_call` reads `request.runtime.context.role`
 #    and `AuditGate.wrap_tool_call` reads `request.runtime.context.customer_id`
 #    (and `.role`) - both need `context_schema=` so `create_agent` populates
