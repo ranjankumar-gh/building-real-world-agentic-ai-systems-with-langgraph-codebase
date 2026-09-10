@@ -3,11 +3,13 @@ that has already been granted."""
 
 import pytest
 from langchain.agents.middleware import ModelRequest
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 
 from atlas.containment import RevocationGate, is_revoked, revoke
+from atlas.graph import _make_builder
 from atlas.security import AtlasContext
 
 
@@ -67,3 +69,48 @@ def test_revocation_is_scoped_to_its_own_subject() -> None:
     revoke(store, "customer-over", reason="operator halt")
 
     assert is_revoked(store, "customer-fresh") is False
+
+
+def _triage_to_answer(state) -> dict:
+    """Stands in for the real triage node so the run is deterministic and
+    model-free. Chapter 21's `build_graph(model=...)` seam is not used here
+    because it compiles its own store internally; this test has to hold the
+    store it revokes into."""
+    return {"route": "answer"}
+
+
+def _reply(state) -> dict:
+    return {"messages": [AIMessage("resolved")]}
+
+
+def test_a_restored_checkpoint_does_not_resurrect_revoked_authority() -> None:
+    """The failure this design exists to prevent. Rewind to a checkpoint
+    written BEFORE the revocation, then confirm the revocation still holds
+    while the state around it genuinely moved backwards."""
+    store = InMemoryStore()
+    graph = _make_builder(_triage_to_answer, resolve_node=_reply).compile(
+        checkpointer=InMemorySaver(), store=store
+    )
+    config = {"configurable": {"thread_id": "containment-rewind"}}
+
+    final = graph.invoke(
+        {"messages": [HumanMessage("first")], "retrieved": []}, config
+    )
+    assert len(final["messages"]) == 2  # the human turn, plus Atlas's reply
+
+    before_answer = next(
+        s for s in graph.get_state_history(config) if s.next == ("answer",)
+    )
+
+    revoke(store, "customer-42", reason="operator halt")
+
+    # AtlasState really did rewind: at this checkpoint Atlas has not replied
+    # yet, so `messages` is back to one. Without this assertion the test
+    # cannot tell "the store survived a rewind" from "no rewind happened".
+    rewound = graph.get_state(before_answer.config)
+    assert len(rewound.values["messages"]) == 1
+
+    resumed = graph.invoke(None, before_answer.config)
+
+    assert len(resumed["messages"]) == 2  # the reply was recomputed, not restored
+    assert is_revoked(store, "customer-42") is True
