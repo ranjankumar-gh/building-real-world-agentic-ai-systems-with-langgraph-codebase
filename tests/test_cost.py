@@ -21,6 +21,7 @@ from atlas.cost import (
     current_period,
     degrade,
 )
+from atlas.containment import is_revoked
 from atlas.security import AtlasContext
 
 
@@ -127,3 +128,58 @@ def test_guard_keeps_tenants_isolated_in_separate_namespaces():
         _request("C-fresh", [HumanMessage("hello")]), lambda r: "handled"
     )
     assert result == "handled"
+
+
+def test_the_cap_only_degrades_unless_revocation_is_asked_for():
+    """The default stays a soft refusal, because the chapter's printed
+    listing argues one. Revocation is opt-in."""
+    store = InMemoryStore()
+    guard = TenantBudgetGuard(store)
+    store.put(
+        budget_ns("customer-42", current_period()),
+        "spent",
+        {"tokens": MONTHLY_TOKEN_CAP + 1},
+    )
+
+    guard.wrap_model_call(
+        _request("customer-42", [HumanMessage("hello")]), handler=lambda r: None
+    )
+
+    assert is_revoked(store, "customer-42") is False
+
+
+def test_breaching_the_cap_revokes_rather_than_only_degrading():
+    """Chapter 23: a ceiling that refuses each call is not a switch that
+    stops the run. Past the cap, take the authority away."""
+    store = InMemoryStore()
+    guard = TenantBudgetGuard(store, revoke_on_breach=True)
+    store.put(
+        budget_ns("customer-42", current_period()),
+        "spent",
+        {"tokens": MONTHLY_TOKEN_CAP + 1},
+    )
+
+    guard.wrap_model_call(
+        _request("customer-42", [HumanMessage("hello")]), handler=lambda r: None
+    )
+
+    assert is_revoked(store, "customer-42") is True
+
+
+def test_the_breach_records_the_cap_as_the_reason():
+    """A revocation with no reason is an outage nobody can explain. The
+    reason string is what an operator reads first."""
+    store = InMemoryStore()
+    guard = TenantBudgetGuard(store, revoke_on_breach=True)
+    store.put(
+        budget_ns("customer-42", current_period()),
+        "spent",
+        {"tokens": MONTHLY_TOKEN_CAP + 1},
+    )
+
+    guard.wrap_model_call(
+        _request("customer-42", [HumanMessage("hello")]), handler=lambda r: None
+    )
+
+    item = store.get(("containment", "customer-42"), "revocation")
+    assert "cap" in item.value["reason"]

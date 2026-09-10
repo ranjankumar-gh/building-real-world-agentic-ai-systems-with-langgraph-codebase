@@ -24,6 +24,8 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.messages import AIMessage
 from langgraph.store.base import BaseStore
 
+from atlas.containment import revoke
+
 MONTHLY_TOKEN_CAP = 2_000_000
 
 
@@ -68,8 +70,14 @@ class TenantBudgetGuard(AgentMiddleware):
     put the counter somewhere increments are atomic (Redis INCR, or a row
     updated in a transaction). See Ch23's callout."""
 
-    def __init__(self, store: BaseStore) -> None:
+    def __init__(self, store: BaseStore, revoke_on_breach: bool = False) -> None:
         self.store = store
+        # Off by default, deliberately. The chapter's own listing above
+        # argues a soft ceiling and a graceful refusal, and a printed
+        # listing that quietly revoked would contradict the paragraph
+        # explaining it. A deployment that wants the harder behavior asks
+        # for it - see "Stopping a run that is already doing damage".
+        self.revoke_on_breach = revoke_on_breach
 
     def wrap_model_call(self, request, handler):
         customer_id: str = request.runtime.context.customer_id
@@ -77,18 +85,25 @@ class TenantBudgetGuard(AgentMiddleware):
         item = self.store.get(ns, "spent")
         spent = item.value["tokens"] if item else 0
         if spent >= MONTHLY_TOKEN_CAP:
-            return degrade(request)  # <1>
-        estimated = count_tokens_approximately(request.messages)  # <2>
+            if self.revoke_on_breach:  # <1>
+                revoke(self.store, customer_id, reason="monthly token cap exceeded")
+            return degrade(request)  # <2>
+        estimated = count_tokens_approximately(request.messages)  # <3>
         self.store.put(ns, "spent", {"tokens": spent + estimated})
         return handler(request)
 
 
-# 1. `degrade` is Atlas's own choice, not a framework default: route to a
+# 1. Climbing a rung: refusing each call one at a time leaves the run
+#    alive and trying. Revoking moves the tenant out of reach of every
+#    later call, in every thread, until a human puts them back. The two
+#    are not alternatives - the refusal below still happens, so this turn
+#    ends the same graceful way whether or not the authority was taken.
+# 2. `degrade` is Atlas's own choice, not a framework default: route to a
 #    cheaper model, or return a clear refusal explaining the tenant is over
 #    its monthly allocation. Either beats the third option - silently
 #    continuing to spend past a cap nobody is watching, which is what "no
 #    per-tenant ceiling" actually means in practice.
-# 2. Counted from the *request*, before the call, the same
+# 3. Counted from the *request*, before the call, the same
 #    approximate-and-headroom discipline Chapter 12 already established -
 #    not an exact post-call usage figure this book hasn't verified an API
 #    for. A cap that undercounts slightly by design is safer than one built
