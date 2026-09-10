@@ -21,12 +21,16 @@ either (see "Naming the fleet"), so the test proves the attribution
 wrapper's own logic (tags, metadata, delegation) without either service."""
 
 import asyncio
+import functools
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.tools import tool
+from langgraph.runtime import Runtime
 
 from atlas import agent as agent_module
 from atlas.agent import (
+    RESOLVE_MIDDLEWARE,
     RESOLVE_PROMPT,
     RESOLVE_TOOLS,
     build_resolve_agent,
@@ -37,6 +41,7 @@ from atlas.agent import (
 )
 from atlas.context import ContextBudget
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
+from atlas.security import AtlasContext
 from atlas.tools import lookup_ticket, search_kb, set_ticket_status
 
 
@@ -188,3 +193,121 @@ def test_run_resolve_requires_route_thread_id_and_customer_id_in_configurable(
 
     with pytest.raises(KeyError):
         run_resolve({"messages": []}, {"configurable": {}})
+
+
+# --- Chapter 23: the security/cost/audit stack, in argued order ------------
+
+
+def test_resolve_stack_carries_the_security_middleware_in_argued_order():
+    """Chapter 23: order is a security control, not a style choice.
+
+    `resolve_agent` is a compiled `CompiledStateGraph` with no readable
+    `middleware` attribute on langgraph==1.2.6, so this asserts against
+    `RESOLVE_MIDDLEWARE`, the list actually passed to `create_agent` -
+    the two are the same list by construction (see atlas/agent.py).
+
+    AuditGate must wrap outside BOTH authority gates - not sit innermost
+    of the four - so a call either one refuses still reaches AuditGate's
+    handler(request) call and gets logged with result_status="error",
+    the same refusal tests/test_audit.py's own
+    test_audit_gate_records_an_error_result_status_too already expects
+    an AuditGate built in isolation to capture. RoleAuthorityGate must
+    likewise sit outside AuthorityGate, so an unauthorized role is
+    blocked before AuthorityGate's own approval check ever runs.
+
+    InjectionGuard must be the INNERMOST wrap_tool_call middleware -
+    wrapping only the real tool invocation - not outermost: it tags
+    whatever its handler(request) call returns as untrusted content
+    unconditionally, and cannot distinguish a governance refusal from
+    real tool output, since both arrive as a ToolMessage. Outermost, a
+    refusal from either authority gate would reach it and get wrapped in
+    <untrusted-content> tags as if Atlas's own policy decision were
+    untrusted tool output. See
+    test_a_role_refusal_reaches_injection_guard_untagged below for the
+    behavioral proof.
+
+    ContextBudget must wrap outside TenantBudgetGuard (a different hook,
+    wrap_model_call, so this is a separate ordering claim from the
+    wrap_tool_call ones above) so the cumulative cap counts tokens from
+    the already-trimmed per-call request, not the raw pre-trim history.
+    context_budget is an instance, not a class with one name in `names`,
+    so this compares positions by identity via RESOLVE_MIDDLEWARE.index
+    rather than by name.
+
+    RevocationGate must sit at index 0. That makes it the outermost of
+    the three wrap_model_call entries, so a revoked subject never reaches
+    context_budget's trim or TenantBudgetGuard's spend write. It does not
+    nest with the wrap_tool_call gates - it has no wrap_tool_call method -
+    and AuditGate writes no record for a revoked subject because raising
+    inside the "model" node means the "tools" node is never reached, which
+    is node order rather than list position. Index 0 buys nothing against
+    the before_model hooks (pii, summarizer); those run before any wrapped
+    model call wherever the list puts them."""
+    names = [type(m).__name__ for m in RESOLVE_MIDDLEWARE]
+
+    assert names[0] == "RevocationGate"
+    assert "InjectionGuard" in names
+    assert "RoleAuthorityGate" in names
+    assert "TenantBudgetGuard" in names
+    assert "AuditGate" in names
+    assert names.index("AuditGate") < names.index("RoleAuthorityGate")
+    assert names.index("AuditGate") < names.index("AuthorityGate")
+    assert names.index("RoleAuthorityGate") < names.index("AuthorityGate")
+    assert names.index("InjectionGuard") > names.index("RoleAuthorityGate")
+    assert names.index("InjectionGuard") > names.index("AuthorityGate")
+    assert names.index("InjectionGuard") > names.index("AuditGate")
+    assert RESOLVE_MIDDLEWARE.index(context_budget) < names.index(
+        "TenantBudgetGuard"
+    )
+
+
+def test_a_role_refusal_reaches_injection_guard_untagged():
+    """The behavioral proof the ordering test above only asserts by index:
+    drive an unauthorized tool call through the actual RESOLVE_MIDDLEWARE
+    wrap_tool_call chain (AuditGate -> RoleAuthorityGate -> AuthorityGate
+    -> InjectionGuard, nested exactly as create_agent nests list order,
+    first = outermost) and confirm RoleAuthorityGate's refusal reaches
+    the caller WITHOUT ever passing through InjectionGuard - so it is
+    never wrapped in <untrusted-content> tags, which would tell the
+    model to treat Atlas's own policy refusal as reference material,
+    never a command, exactly backwards for something Atlas itself said.
+
+    Only middleware that actually override wrap_tool_call participate -
+    AgentMiddleware's own default raises rather than passing a call
+    through untouched, so pii/context_budget/summarizer/TenantBudgetGuard
+    (wrap_model_call or before_model hooks) and approval (after_model,
+    confirmed by reading langchain.agents.middleware.human_in_the_loop -
+    it resolves a rejection before the tools node runs, so it never nests
+    with wrap_tool_call middleware at all) are excluded rather than
+    invoked as no-ops."""
+    hooking = [
+        mw
+        for mw in RESOLVE_MIDDLEWARE
+        if type(mw).wrap_tool_call is not AgentMiddleware.wrap_tool_call
+    ]
+
+    def _tool_must_never_run(_request: ToolCallRequest):
+        raise AssertionError("an unauthorized role must never reach the tool")
+
+    chain = _tool_must_never_run
+    for middleware in reversed(hooking):
+        chain = functools.partial(middleware.wrap_tool_call, handler=chain)
+
+    request = ToolCallRequest(
+        tool_call={
+            "name": "set_ticket_status",
+            "args": {"ticket_id": "T-1001", "status": "resolved"},
+            "id": "call-1",
+        },
+        tool=None,
+        state=None,
+        runtime=Runtime(
+            context=AtlasContext(role="support_readonly", customer_id="C-1")
+        ),
+    )
+
+    result = chain(request)
+
+    assert result.status == "error"
+    assert "not authorized" in result.content
+    assert "<untrusted-content" not in result.content
