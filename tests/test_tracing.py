@@ -26,6 +26,13 @@ from atlas.tracing import (
     redact_trace_outputs,
 )
 
+# Captured at import, BEFORE any test in this module runs. Several of them
+# drive configure_tracing, which assigns LANGSMITH_API_KEY through
+# os.environ directly rather than through monkeypatch, so by the time the
+# live test runs the ambient key can be a fake one left behind by a
+# neighbour. The live test builds its client from this instead.
+_REAL_LANGSMITH_KEY = os.environ.get("LANGSMITH_API_KEY")
+
 requires_langsmith = pytest.mark.skipif(
     not os.environ.get("LANGSMITH_API_KEY"),
     reason="requires a live LangSmith connection",
@@ -127,10 +134,96 @@ def test_langsmith_client_is_constructed_locally_with_hide_outputs_wired():
 
 
 @requires_langsmith
-def test_a_traced_run_is_readable_back_from_a_live_langsmith_project():
+def test_a_traced_run_is_readable_back_from_a_live_langsmith_project(monkeypatch):
     """The one thing this chapter genuinely cannot verify offline: that a
     run submitted with tracing on actually lands in, and is readable back
-    from, a real LangSmith project. Skipped without LANGSMITH_API_KEY."""
-    client = Client()
-    projects = list(client.list_projects(limit=1))
-    assert isinstance(projects, list)
+    from, a real LangSmith project. Skipped without LANGSMITH_API_KEY.
+
+    The previous version of this test listed projects and asserted the
+    result was a list. `list(...)` is always a list, so it passed against an
+    account with no traces in it at all - it never submitted a run and never
+    read one back, which is the entire claim in the sentence above.
+
+    This version submits a traced call to a per-run project, polls until
+    ingestion catches up, and asserts on the run's name and outputs.
+    Ingestion is asynchronous, so the poll is the test being honest about
+    the service rather than flaky: a fixed sleep would either be too short
+    on a slow day or waste time on a fast one.
+    """
+    import time
+    import uuid
+
+    from langsmith import traceable
+    from langsmith.run_helpers import tracing_context
+
+    # The API key alone submits nothing. LANGSMITH_TRACING=true is the
+    # switch, which is this chapter's own point: "Nothing about a missing
+    # LANGSMITH_TRACING=true crashes Atlas. The graph runs exactly the
+    # same." The first run of this test proved it the hard way, waiting the
+    # full 90 seconds for a trace that was never going to be sent.
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", _REAL_LANGSMITH_KEY)
+    # configure_otel_export sets LANGSMITH_OTEL_ONLY=true, which routes
+    # traces EXCLUSIVELY through the OTel exporter - nothing reaches the
+    # LangSmith API, so this test's poll would find nothing and report it as
+    # "no run arrived". Clear it explicitly rather than depending on which
+    # neighbour ran first and whether it cleaned up after itself.
+    monkeypatch.delenv("LANGSMITH_OTEL_ONLY", raising=False)
+
+    client = Client(api_key=_REAL_LANGSMITH_KEY)
+    project = f"atlas-tracing-test-{uuid.uuid4().hex[:12]}"
+    payload = uuid.uuid4().hex[:8]
+
+    @traceable(name="atlas_traced_probe")
+    def traced_probe(value: str) -> dict:
+        return {"echoed": value}
+
+    # Pass the client explicitly rather than letting @traceable pick up an
+    # ambient one. Earlier tests in this module drive configure_tracing,
+    # which assigns LANGSMITH_API_KEY through os.environ directly, and the
+    # tracing background client caches whatever key it first saw. Running
+    # this test after them without an explicit client submits with a stale
+    # fake key and the ingest endpoint answers 403 Forbidden - which the
+    # poll above can only report as "no run arrived". It passes alone and
+    # fails in the full suite, which is the signature of exactly that.
+    # LANGSMITH_TRACING=true in the environment is NOT sufficient here.
+    # tracing_is_enabled() consults a context variable first, and something
+    # earlier in a full-suite run leaves it disabled - measured, not
+    # assumed: at this point the env said "true" while tracing_is_enabled()
+    # returned False, which is why this test passed alone and failed in the
+    # suite. tracing_context(enabled=True) sets the thing that actually
+    # decides.
+    with tracing_context(enabled=True):
+        result = traced_probe(
+            payload, langsmith_extra={"project_name": project, "client": client}
+        )
+    assert result == {"echoed": payload}  # the wrapper must not change behaviour
+
+    # Push anything still buffered in the background sender before polling.
+    flush = getattr(client, "flush", None)
+    if callable(flush):
+        flush()
+
+    runs = []
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        try:
+            runs = list(client.list_runs(project_name=project))
+        except Exception:
+            runs = []  # project not visible yet; ingestion still catching up
+        if runs:
+            break
+        time.sleep(3)
+
+    try:
+        assert runs, f"no run reached project {project} within 90s"
+
+        run = runs[0]
+        assert run.name == "atlas_traced_probe"
+        assert run.outputs == {"echoed": payload}
+        assert run.inputs.get("value") == payload
+    finally:
+        try:
+            client.delete_project(project_name=project)
+        except Exception:
+            pass  # best effort; a stray empty test project is not a failure
