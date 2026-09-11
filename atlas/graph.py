@@ -363,7 +363,19 @@ def _make_builder(
     the `resolve_node` seam for mounting a middleware-equipped agent in the
     answering position; see Chapter 17's mounting section for the pattern."""
     b = StateGraph(AtlasState)
-    b.add_node("triage", triage_node)
+    b.add_node(
+        "triage",
+        triage_node,
+        # Chapter 4, "A first look at retries": triage makes the first live
+        # model call in the graph, and a model call is a read - safe to
+        # retry, and previously not retried at all. NOTE the absent
+        # retry_on: the default predicate (langgraph.types.default_retry_on)
+        # retries a provider rate-limit error and declines to retry a
+        # ValueError. Naming retry_on=(ConnectionError,) here would REPLACE
+        # that judgement with a whitelist of one, and a 429 arrives as
+        # anthropic.RateLimitError, which is not a ConnectionError.
+        retry_policy=RetryPolicy(max_attempts=3),
+    )
     b.add_node(
         "retrieve",
         retrieve,
