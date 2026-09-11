@@ -271,13 +271,76 @@ def test_run_atlas_uses_a_fresh_thread_id_on_every_call(monkeypatch):
 @requires_langsmith
 def test_build_regression_dataset_creates_the_frozen_dataset_in_langsmith():
     """Skipped by default - see `requires_langsmith` above. Real teams run
-    this once, not in CI."""
-    build_regression_dataset("atlas-regression-test-run")
+    this once, not in CI.
+
+    This used to call build_regression_dataset and assert nothing, so any
+    function that returned without raising passed a test named "creates the
+    frozen dataset". It now reads the dataset back out of LangSmith and
+    checks that every REGRESSION_EXAMPLES entry actually landed.
+
+    The name is per-run because `create_dataset` errors on a collision, by
+    design - the chapter argues a frozen dataset should be hard to
+    overwrite. A fixed name would pass once and fail forever after.
+    """
+    import uuid
+
+    name = f"atlas-regression-test-{uuid.uuid4().hex[:12]}"
+
+    build_regression_dataset(name)
+    dataset = None
+    try:
+        dataset = evals_module.client.read_dataset(dataset_name=name)
+        assert dataset.name == name
+
+        examples = list(evals_module.client.list_examples(dataset_id=dataset.id))
+        assert len(examples) == len(REGRESSION_EXAMPLES)
+
+        # Path coverage is the point of this dataset, so check the routes
+        # made it across rather than just the row count.
+        expected_routes = sorted(
+            e["outputs"]["route"]
+            for e in REGRESSION_EXAMPLES
+            if "route" in e["outputs"]
+        )
+        actual_routes = sorted(
+            e.outputs["route"] for e in examples if e.outputs and "route" in e.outputs
+        )
+        assert actual_routes == expected_routes
+    finally:
+        # Leave no per-run datasets behind in a real account. Delete by ID,
+        # not by name: delete_dataset(dataset_name=...) returned a 500 from
+        # the live API when this test was first run against it, while the
+        # same delete by dataset_id succeeded.
+        if dataset is not None:
+            evals_module.client.delete_dataset(dataset_id=dataset.id)
 
 
 @requires_langsmith
 @requires_anthropic
 def test_run_regression_suite_gates_against_the_frozen_dataset():
     """Skipped by default - needs both a live LangSmith dataset and a live
-    Anthropic connection for the answer_quality judge."""
-    run_regression_suite()
+    Anthropic connection for the answer_quality judge.
+
+    NOT YET RUN AGAINST THE LIVE SERVICES. The two other LangSmith-guarded
+    tests in this repo were strengthened and executed; this one needs an
+    Anthropic key as well and has only been reasoned about. Treat the
+    assertions below as unverified until someone runs it, and read the
+    result rather than the green tick the first time.
+
+    It previously called run_regression_suite() and asserted nothing, so a
+    suite that evaluated zero examples, or one whose every evaluator
+    errored, passed a test named "gates against the frozen dataset". A gate
+    that cannot fail is not a gate.
+    """
+    results = run_regression_suite()
+
+    rows = list(results)
+    assert rows, "the suite evaluated no examples, so it gates nothing"
+    assert len(rows) == len(REGRESSION_EXAMPLES)
+
+    # Every evaluator must have produced a result for every row. A scored
+    # row that silently lost an evaluator is the failure this dataset's
+    # path coverage exists to catch.
+    for row in rows:
+        scores = {r["key"]: r for r in row["evaluation_results"]["results"]}
+        assert scores, "a row came back with no evaluator results at all"
