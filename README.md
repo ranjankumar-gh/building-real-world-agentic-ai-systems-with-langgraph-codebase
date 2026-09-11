@@ -52,6 +52,15 @@ without one - they are not required for the rest of the suite to pass.
   `escalate`. `atlas/state.py` adds `refund_done` additively. No external service or skip guard is
   needed - everything runs against the seeded, in-memory refund/ticket backends already in the
   repo.
+- **Chapter 23, Security, Privacy, Cost, and Governance.** `atlas/auth.py` (new) is server-side
+  identity for the Agent Server: `@auth.authenticate` turns a bearer token into an identity plus
+  the role that identity holds, `@auth.on` denies any unhandled resource, and `@auth.on.threads`
+  filters threads to their owner. It is deliberately NOT wired into `langgraph.json` - adding
+  `"auth": {"path": "./atlas/auth.py:auth"}` makes every request to a local `langgraph up` need a
+  token, which would break this repo's run-with-no-setup promise. Add that line when you deploy.
+  Tokens in `DEV_IDENTITIES` are seeded and mockable like every other backend here; `verify_token`
+  is the seam a real deployment replaces. `tests/test_auth.py` calls the handlers directly, so the
+  identity layer is testable with no server running.
 
 ## Reading paths
 
