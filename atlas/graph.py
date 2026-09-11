@@ -127,7 +127,6 @@ from typing import Literal
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.pregel import Pregel
 from langgraph.runtime import Runtime
@@ -485,6 +484,18 @@ async def run_durable(message: str, config: dict, db_uri: str = DB_URI) -> Atlas
     compiled graph (and its checkpointer connection) only lives for the
     duration of this call - a real deployment keeps that context open for
     the life of the process instead of opening and closing it per call."""
+    # Imported HERE, not at module scope. atlas/memory.py's build_prod_store
+    # already does this for the same class of dependency, and graph.py was
+    # the odd one out. The cost of the module-level version was concrete:
+    # importing atlas.graph required psycopg's binary extra even on paths
+    # that never touch Postgres, so `langgraph dev` - the Docker-free server
+    # this book points readers at - could not load the graph at all. It
+    # failed with `no pq wrapper available`, which is precisely the import
+    # failure Chapter 9 warns about two paragraphs before it prints this
+    # function. A production-only dependency should not be a hard
+    # requirement for loading the module.
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
     async with AsyncPostgresSaver.from_conn_string(db_uri) as checkpointer:
         durable_graph = builder.compile(
             checkpointer=checkpointer, store=InMemoryStore()
