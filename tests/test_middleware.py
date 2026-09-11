@@ -153,3 +153,84 @@ def test_pii_scans_content_without_raising_with_the_fixed_detector():
 
     assert redacted_text == "contact me at [REDACTED_EMAIL]"
     assert matches[0]["value"] == "a@b.com"
+
+# --- Chapter 8, "A cache that ignores the full request serves wrong
+# --- answers": the node-level cache LangGraph already ships, and the two
+# --- ways it silently does nothing.
+
+
+def _counting_cache_graph(cache, ttl=None):
+    """A one-node graph whose node records every real execution, so a cache
+    hit is observable as a run that did not happen."""
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import CachePolicy
+
+    class CacheState(TypedDict):
+        n: int
+
+    runs: list[int] = []
+
+    def work(state: CacheState) -> dict:
+        runs.append(state["n"])
+        return {"n": state["n"] + 1}
+
+    builder = StateGraph(CacheState)
+    builder.add_node(
+        "work",
+        work,
+        cache_policy=CachePolicy(key_func=lambda s: str(s["n"]), ttl=ttl),
+    )
+    builder.add_edge(START, "work")
+    builder.add_edge("work", END)
+    return builder.compile(cache=cache), runs
+
+
+def test_node_cache_skips_a_repeated_identical_step():
+    """The feature exists and works: the same input twice runs the node
+    once."""
+    from langgraph.cache.memory import InMemoryCache
+
+    graph, runs = _counting_cache_graph(InMemoryCache())
+
+    graph.invoke({"n": 1})
+    graph.invoke({"n": 1})
+
+    assert runs == [1]
+
+
+def test_a_cache_policy_without_a_cache_is_silently_ignored():
+    """Trap one, and the reason to assert on cache behaviour rather than
+    trust the configuration. `cache_policy=` on a node does nothing unless
+    `compile(cache=...)` supplies a backend. There is no error and no
+    warning: the node just runs every time, and the only symptom is a bill
+    that never went down."""
+    graph, runs = _counting_cache_graph(None)
+
+    graph.invoke({"n": 1})
+    graph.invoke({"n": 1})
+
+    assert runs == [1, 1]
+
+
+def test_cache_policy_ttl_is_seconds_not_minutes():
+    """Trap two. `CachePolicy.ttl` is in SECONDS, while `BaseStore.put`'s
+    `ttl` argument is in MINUTES (see tests/test_research.py). Two
+    time-to-live settings in one framework, two different units. Reading
+    one as the other is off by sixty in whichever direction hurts."""
+    import time
+
+    from langgraph.cache.memory import InMemoryCache
+
+    graph, runs = _counting_cache_graph(InMemoryCache(), ttl=1)
+
+    graph.invoke({"n": 1})
+    graph.invoke({"n": 1})
+    assert runs == [1]  # inside the window
+
+    time.sleep(1.6)
+    graph.invoke({"n": 1})
+
+    # Expired after 1.6 seconds, which it would not be if ttl=1 meant a minute.
+    assert runs == [1, 1]

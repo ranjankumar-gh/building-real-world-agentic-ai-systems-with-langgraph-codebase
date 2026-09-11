@@ -29,6 +29,8 @@ Chapter 24, "Patterns from Production", adds the memory-horizon retrofit:
 live call and no external service - `store.put`/`store.get` against a real
 `InMemoryStore`, same convention as tests/test_memory.py."""
 
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -401,6 +403,62 @@ def test_recall_finding_treats_a_stale_hit_as_a_miss():
     )
 
     assert recall_finding(store, "cust-1", "return policy?") is None
+
+
+# --- Why recall_finding does its own expiry check, rather than leaning on
+# --- the store's TTLConfig. These pin the two facts that decision rests on.
+
+requires_postgres = pytest.mark.skipif(
+    not os.environ.get("ATLAS_POSTGRES_TEST_DSN"),
+    reason="requires a live Postgres connection (ATLAS_POSTGRES_TEST_DSN)",
+)
+
+
+def test_the_dev_store_refuses_ttl_outright():
+    """Reason one. LangGraph ships TTL support, and InMemoryStore does not
+    have it: passing a ttl raises rather than being quietly ignored. Every
+    test above, and Atlas's whole dev path, runs on this store."""
+    store = InMemoryStore()
+
+    with pytest.raises(NotImplementedError, match="TTL is not supported"):
+        store.put(research_ns("cust-1"), "return policy?", {"findings": []}, ttl=1.0)
+
+
+@requires_postgres
+def test_store_ttl_deletes_on_sweep_rather_than_hiding_on_read():
+    """Reason two, and the more surprising one. On a store that DOES support
+    TTL, an expired item is still returned by get() until a sweep deletes
+    it. TTLConfig reclaims storage; it does not filter reads.
+
+    So the store's TTL and recall_finding's timestamp check are not two ways
+    to do one job. Between sweeps, TTL alone would still hand back a stale
+    finding. The read-time check is what makes staleness impossible to
+    observe, which is the guarantee the chapter's recall_finding promises.
+    """
+    from langgraph.store.base import TTLConfig
+    from langgraph.store.postgres import PostgresStore
+
+    dsn = os.environ["ATLAS_POSTGRES_TEST_DSN"]
+    ttl_minutes = 0.02  # 1.2 seconds; TTL is expressed in minutes
+
+    with PostgresStore.from_conn_string(
+        dsn, ttl=TTLConfig(default_ttl=ttl_minutes, refresh_on_read=False)
+    ) as store:
+        store.setup()
+        assert store.supports_ttl is True
+
+        store.put(research_ns("cust-ttl"), "return policy?", {"findings": ["x"]})
+        assert store.get(research_ns("cust-ttl"), "return policy?") is not None
+
+        time.sleep(ttl_minutes * 60 + 1.5)
+
+        # Expired by the clock, and still served. This is the fact that
+        # justifies recall_finding checking recorded_at itself.
+        assert store.get(research_ns("cust-ttl"), "return policy?") is not None
+
+        store.sweep_ttl()  # what the background sweeper thread does on a timer
+
+        assert store.get(research_ns("cust-ttl"), "return policy?") is None
 
 
 def test_recall_finding_returns_a_hit_just_inside_the_ttl_window():
