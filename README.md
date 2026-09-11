@@ -52,6 +52,14 @@ without one - they are not required for the rest of the suite to pass.
   `escalate`. `atlas/state.py` adds `refund_done` additively. No external service or skip guard is
   needed - everything runs against the seeded, in-memory refund/ticket backends already in the
   repo.
+- **Chapter 22, Deployment and Scaling.** `langgraph up` comes from the separate `langgraph-cli`
+  package, which is NOT a dependency of this repo and which `uv sync` does not install. Install it
+  as a tool: `uv tool install langgraph-cli`. Note that the `pip install langgraph-cli` form in the
+  LangGraph docs fails here, because `uv` creates virtual environments without `pip` in them and
+  the command answers `No module named pip`. `langgraph up` also needs Docker running and a
+  LangSmith key for the server's license check. On Windows, set `PYTHONIOENCODING=utf-8` first:
+  the CLI prints an emoji and the default console code page cannot encode it, so every `langgraph`
+  command dies with a `UnicodeEncodeError` before doing any work, `--help` included.
 - **Chapter 23, Security, Privacy, Cost, and Governance.** `atlas/auth.py` (new) is server-side
   identity for the Agent Server: `@auth.authenticate` turns a bearer token into an identity plus
   the role that identity holds, `@auth.on` denies any unhandled resource, and `@auth.on.threads`
