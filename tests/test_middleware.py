@@ -28,6 +28,9 @@ against the installed `langchain==1.3.0` build, `_process_content` raises
 scanned. `test_pii_detector_is_a_regex_pattern_string_not_a_broken_callable`
 guards against that regression."""
 
+import asyncio
+
+import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -45,12 +48,14 @@ from langgraph.types import Command
 from atlas.middleware import (
     EMAIL_PATTERN,
     AuthorityGate,
+    KBOutageGuard,
     RecordingApproval,
     approval,
     pii,
     redact_email,
     summarizer,
 )
+from atlas.tools import KnowledgeBaseUnavailable
 
 
 def _request(name: str, args: dict, state: dict | None = None) -> ToolCallRequest:
@@ -495,3 +500,67 @@ def test_cache_policy_ttl_is_seconds_not_minutes():
 
     # Expired after 1.6 seconds, which it would not be if ttl=1 meant a minute.
     assert runs == [1, 1]
+
+
+# --- KBOutageGuard: a KB outage becomes a tool error, not the end of the run.
+
+
+@tool
+def search_kb(query: str) -> str:
+    """Stand-in for Chapter 7's KB tool, with its backend down."""
+    raise KnowledgeBaseUnavailable("KB backend timed out")
+
+
+class _RecordingModel(_ScriptedModel):
+    """Scripted, and records the last message of every request it receives."""
+
+    seen: list
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(messages[-1])
+        return super()._generate(
+            messages, stop=stop, run_manager=run_manager, **kwargs
+        )
+
+
+def _outage_agent(middleware: list):
+    call = {"name": "search_kb", "id": "call-kb", "args": {"query": "refunds"}}
+    model = _RecordingModel(
+        messages=iter([AIMessage("", tool_calls=[call]), AIMessage("KB is down.")]),
+        seen=[],
+    )
+    agent = create_agent(model=model, tools=[search_kb], middleware=middleware)
+    return agent, model
+
+
+def _assert_model_saw_the_outage(out: dict, model: _RecordingModel) -> None:
+    error = _tool_results(out)[0]
+    assert error.status == "error"
+    assert error.tool_call_id == "call-kb"
+    assert "Knowledge base unavailable" in error.content
+    assert model.seen[-1] is not None and model.seen[-1].tool_call_id == "call-kb"
+    assert out["messages"][-1].content == "KB is down."
+
+
+def test_without_the_guard_a_kb_outage_ends_the_run():
+    agent, _ = _outage_agent([])
+    with pytest.raises(KnowledgeBaseUnavailable):
+        agent.invoke({"messages": [("user", "refund window?")]})
+
+
+def test_the_guard_turns_a_kb_outage_into_an_error_the_model_reads():
+    agent, model = _outage_agent([KBOutageGuard()])
+    out = agent.invoke({"messages": [("user", "refund window?")]})
+    _assert_model_saw_the_outage(out, model)
+
+
+def test_the_guard_async_twin_catches_the_outage_under_ainvoke():
+    agent, model = _outage_agent([KBOutageGuard()])
+    out = asyncio.run(agent.ainvoke({"messages": [("user", "refund window?")]}))
+    _assert_model_saw_the_outage(out, model)
+
+
+def test_the_guard_sits_beside_the_gate_in_one_stack():
+    agent, model = _outage_agent([AuthorityGate(), KBOutageGuard()])
+    out = asyncio.run(agent.ainvoke({"messages": [("user", "refund window?")]}))
+    _assert_model_saw_the_outage(out, model)

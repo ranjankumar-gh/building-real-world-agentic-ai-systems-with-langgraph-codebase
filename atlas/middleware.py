@@ -66,6 +66,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from atlas.tools import KnowledgeBaseUnavailable
+
 log = logging.getLogger("atlas")
 
 # --- PII redaction: redact email addresses in, and again out. ----------------
@@ -146,6 +148,45 @@ class AuthorityGate(AgentMiddleware):
     ) -> ToolMessage | Command:
         refusal = self._refusal(request)
         return refusal if refusal is not None else await handler(request)
+
+
+# --- A knowledge-base outage the model can see. ------------------------------
+# Chapter 8, "Production considerations": at the pins the tools node re-raises
+# any exception a tool raises, so a KB outage would end the run. This layer
+# turns it into an error ToolMessage, so the model can say so or escalate.
+# Not in the shipped stack: the seeded `_KB` in atlas/tools.py never raises.
+
+
+class KBOutageGuard(AgentMiddleware):
+    """Turn a knowledge-base outage into a tool error the model can read."""
+
+    def _outage(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
+        log.warning("tool_call name=%s failed: %s", request.tool_call["name"], exc)
+        return ToolMessage(
+            f"Knowledge base unavailable: {exc}",
+            tool_call_id=request.tool_call["id"],
+            status="error",
+        )
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        try:
+            return handler(request)
+        except KnowledgeBaseUnavailable as exc:
+            return self._outage(request, exc)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        try:
+            return await handler(request)
+        except KnowledgeBaseUnavailable as exc:
+            return self._outage(request, exc)
 
 
 # --- Human approval: pause, then record what the human let through. --------
