@@ -33,6 +33,7 @@ it tracks ticket age, not status."""
 
 from typing import Literal
 
+from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 
 # Seeded, mockable backend - ships in the companion repo (Appendix G).
@@ -168,7 +169,7 @@ def send_checkin(key: str, ticket_id: str, message: str) -> str:
     return _SLA_TICKETS.send_message(key, ticket_id, message)
 
 
-def text_of(message) -> str:
+def text_of(message: BaseMessage) -> str:
     """Plain text from a message's standardized content blocks."""
     return "".join(
         block["text"]

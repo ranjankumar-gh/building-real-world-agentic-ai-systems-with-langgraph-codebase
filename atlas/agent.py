@@ -69,6 +69,7 @@ constraints this chapter adds.
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.graph.state import CompiledStateGraph
 from langsmith import trace
 
 from atlas.audit import AuditGate
@@ -220,13 +221,14 @@ resolve_agent = create_agent(
 #    See `atlas/security.py`'s module docstring.
 
 
-async def build_resolve_agent():
+async def build_resolve_agent() -> CompiledStateGraph:
     """Reach an external tool server over MCP and fold its tools in
     alongside the in-process ones. See "Reaching external tools with MCP".
 
-    `client.get_tools()` can fail open - if any configured server fails to
-    connect it can silently return fewer tools, or none - so the guard
-    below refuses to start rather than run with a silently shrunken
+    A server that fails to connect makes `client.get_tools()` raise. A
+    server that connects but lists none of the tools you need returns an
+    empty or short list without complaint, so the guard below refuses to
+    start on an empty list rather than run with a silently shrunken
     authority surface. See "Production considerations"."""
     client = MultiServerMCPClient(
         {
@@ -248,8 +250,9 @@ async def build_resolve_agent():
 
 
 # 1. The guard matters more than it looks - see "Production considerations".
-#    get_tools() can return an empty list when a server fails to connect,
-#    silently shrinking the authority surface.
+#    A server that connects but lists none of the tools you need returns an
+#    empty or short list without complaint; a server that fails to connect
+#    makes get_tools() raise. This guard catches only the empty case.
 # 2. MCP tools and in-process tools are the same type from here on; the
 #    agent does not distinguish them.
 
