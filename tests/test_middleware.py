@@ -5,7 +5,10 @@ configuration of the three built-ins (no live model call needed to build
 them, matching the no-live-call convention from `tests/test_hello.py`), and
 exercise `AuthorityGate.wrap_tool_call` directly against a hand-built
 `ToolCallRequest` - the one piece of this chapter's stack that is plain
-Python logic rather than a wired-up built-in.
+Python logic rather than a wired-up built-in. The approve / reject /
+never-approved tests then run the gate end to end behind `approval` (a
+`RecordingApproval`) with a scripted fake model and an in-memory
+checkpointer, and the PII-order test backs Exercise 1 with two probes.
 
 `test_stack_composes_without_duplicate_middleware_errors` guards the bug the
 chapter's first draft had: `create_agent` identifies each `PIIMiddleware` by
@@ -27,22 +30,34 @@ guards against that regression."""
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
+    AgentMiddleware,
     HumanInTheLoopMiddleware,
     PIIMiddleware,
     SummarizationMiddleware,
     ToolCallRequest,
 )
-from langchain_core.messages import ToolMessage
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
-from atlas.middleware import EMAIL_PATTERN, AuthorityGate, approval, pii, redact_email, summarizer
+from atlas.middleware import (
+    EMAIL_PATTERN,
+    AuthorityGate,
+    RecordingApproval,
+    approval,
+    pii,
+    redact_email,
+    summarizer,
+)
 
 
-def _request(name: str, args: dict) -> ToolCallRequest:
+def _request(name: str, args: dict, state: dict | None = None) -> ToolCallRequest:
     return ToolCallRequest(
         tool_call={"name": name, "args": args, "id": "call-1"},
         tool=None,
-        state=None,
+        state={} if state is None else state,
         runtime=None,
     )
 
@@ -82,10 +97,176 @@ def test_summarizer_triggers_on_tokens_and_keeps_recent_messages():
 
 def test_approval_pauses_before_set_ticket_status():
     assert isinstance(approval, HumanInTheLoopMiddleware)
+    assert isinstance(approval, RecordingApproval)
     assert "set_ticket_status" in approval.interrupt_on
 
 
-def test_authority_gate_blocks_resolving_a_ticket_without_running_the_tool():
+# --- Chapter 8, "Human approval, as a placeholder": the gate defers to the
+# --- approval pause. End to end through create_agent, with a scripted fake
+# --- model (no API key) and an in-memory checkpointer so the pause resumes.
+
+_ran: list[dict] = []
+
+
+@tool
+def set_ticket_status(ticket_id: str, status: str) -> str:
+    """Stand-in for Chapter 7's write tool; records every real run."""
+    _ran.append({"ticket_id": ticket_id, "status": status})
+    return f"{ticket_id} -> {status}"
+
+
+class _ScriptedModel(GenericFakeChatModel):
+    """GenericFakeChatModel lacks bind_tools, which create_agent calls."""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+def _resolve_run(middleware: list, decision: dict | None) -> dict:
+    """One `set_ticket_status(T-1001, "resolved")` proposal, then "done".
+    Resumes with `decision` if one is given; returns the final state."""
+    _ran.clear()
+    call = {
+        "name": "set_ticket_status",
+        "id": "call-1",
+        "args": {"ticket_id": "T-1001", "status": "resolved"},
+    }
+    model = _ScriptedModel(
+        messages=iter([AIMessage("", tool_calls=[call]), AIMessage("done")])
+    )
+    agent = create_agent(
+        model=model,
+        tools=[set_ticket_status],
+        middleware=middleware,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "t"}}
+    out = agent.invoke({"messages": [("user", "resolve T-1001")]}, config)
+    if decision is not None:
+        assert "__interrupt__" in out  # the pause fired before the tools node
+        out = agent.invoke(Command(resume={"decisions": [decision]}), config)
+    return out
+
+
+def _tool_results(out: dict) -> list[ToolMessage]:
+    return [m for m in out["messages"] if isinstance(m, ToolMessage)]
+
+
+def test_an_approved_resolve_runs_through_the_gate():
+    """(a) In the chapter's composed stack, a human approves the paused call
+    and the tool runs - the gate does not refuse what a human approved."""
+    out = _resolve_run(
+        [pii, summarizer, AuthorityGate(), approval], {"type": "approve"}
+    )
+
+    assert _ran == [{"ticket_id": "T-1001", "status": "resolved"}]
+    assert out["approved_calls"] == ["call-1"]
+    assert _tool_results(out)[0].status == "success"
+
+
+def test_an_edited_resolve_counts_as_approved():
+    edited = {
+        "type": "edit",
+        "edited_action": {
+            "name": "set_ticket_status",
+            "args": {"ticket_id": "T-1001", "status": "resolved"},
+        },
+    }
+    out = _resolve_run([AuthorityGate(), approval], edited)
+
+    assert _ran == [{"ticket_id": "T-1001", "status": "resolved"}]
+    assert out["approved_calls"] == ["call-1"]
+
+
+def test_a_rejected_resolve_never_runs():
+    """(b) A rejection answers the call with a ToolMessage in after_model,
+    so the tools node never runs it and nothing is recorded as approved."""
+    out = _resolve_run(
+        [pii, summarizer, AuthorityGate(), approval],
+        {"type": "reject", "message": "not yet"},
+    )
+
+    assert _ran == []
+    assert out["approved_calls"] == []
+    assert [m.content for m in _tool_results(out)] == ["not yet"]
+
+
+def test_a_resolve_with_no_approval_layer_is_blocked():
+    """(c) A write that reaches the gate without the approval step - here
+    the approval middleware is not on the list at all - is refused."""
+    out = _resolve_run([AuthorityGate()], None)
+
+    assert _ran == []
+    assert "approval" in _tool_results(out)[0].content
+
+
+def test_a_resolve_the_approval_layer_does_not_pause_on_is_blocked():
+    """(c) The approval layer is present but not configured for this tool,
+    so no pause fires, no record is written, and the gate refuses."""
+    unrelated = RecordingApproval(interrupt_on={"search_kb": True})
+    out = _resolve_run([AuthorityGate(), unrelated], None)
+
+    assert _ran == []
+    assert _tool_results(out)[0].status == "error"
+
+
+# --- Chapter 8, Exercise 1: order decides which layers read the raw email,
+# --- not what the model receives.
+
+
+class _RawProbe(AgentMiddleware):
+    """Records the latest HumanMessage as this layer's before_model sees it."""
+
+    def __init__(self, seen: list[str]) -> None:
+        super().__init__()
+        self.seen = seen
+
+    def before_model(self, state, runtime):
+        last = [m for m in state["messages"] if isinstance(m, HumanMessage)][-1]
+        self.seen.append(last.content)
+        return None
+
+
+class _ModelInputProbe(AgentMiddleware):
+    """Innermost wrap_model_call: records what the model would receive and
+    answers without calling it, so no model and no API key are needed."""
+
+    def __init__(self, seen: list[str]) -> None:
+        super().__init__()
+        self.seen = seen
+
+    def wrap_model_call(self, request, handler):
+        self.seen.append(request.messages[-1].content)
+        return AIMessage("ok")
+
+
+def _probe_order(shipped: bool) -> tuple[list[str], list[str]]:
+    raw: list[str] = []
+    model_in: list[str] = []
+    probe = _RawProbe(raw)
+    if shipped:
+        stack = [pii, probe, summarizer, AuthorityGate(), approval]
+    else:
+        stack = [probe, summarizer, AuthorityGate(), approval, pii]
+    agent = create_agent(
+        model="claude-sonnet-4-6",
+        tools=[set_ticket_status],
+        middleware=[*stack, _ModelInputProbe(model_in)],
+    )
+    agent.invoke({"messages": [("user", "Refund jane.doe@example.com please")]})
+    return raw, model_in
+
+
+def test_pii_order_changes_what_the_summarizer_reads_not_what_the_model_gets():
+    shipped_raw, shipped_model = _probe_order(shipped=True)
+    moved_raw, moved_model = _probe_order(shipped=False)
+
+    assert shipped_raw == ["Refund [REDACTED_EMAIL] please"]
+    assert moved_raw == ["Refund jane.doe@example.com please"]
+    assert shipped_model == moved_model == ["Refund [REDACTED_EMAIL] please"]
+
+
+def test_authority_gate_blocks_an_unapproved_resolve_without_running_the_tool():
     gate = AuthorityGate()
     request = _request("set_ticket_status", {"ticket_id": "T-1001", "status": "resolved"})
     called = []
@@ -100,6 +281,33 @@ def test_authority_gate_blocks_resolving_a_ticket_without_running_the_tool():
     assert result.status == "error"
     assert "approval" in result.content
     assert called == []  # the real tool never ran
+
+
+def test_authority_gate_lets_through_a_resolve_the_human_approved():
+    """The record `approval` writes on an approve or edit decision is what
+    the gate defers to: the same call id in `approved_calls` runs."""
+    gate = AuthorityGate()
+    request = _request(
+        "set_ticket_status",
+        {"ticket_id": "T-1001", "status": "resolved"},
+        state={"approved_calls": ["call-1"]},
+    )
+
+    assert gate.wrap_tool_call(request, lambda req: "ran") == "ran"
+
+
+def test_authority_gate_does_not_accept_another_calls_approval():
+    gate = AuthorityGate()
+    request = _request(
+        "set_ticket_status",
+        {"ticket_id": "T-1001", "status": "resolved"},
+        state={"approved_calls": ["call-0"]},
+    )
+
+    result = gate.wrap_tool_call(request, lambda req: "ran")
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
 
 
 def test_authority_gate_passes_through_non_resolving_calls():

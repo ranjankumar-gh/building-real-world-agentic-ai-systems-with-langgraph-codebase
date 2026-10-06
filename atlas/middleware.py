@@ -15,13 +15,19 @@ instead, as an ordered stack of layers on the agent-loop seam:
   crosses a token threshold, keeping the most recent messages verbatim. See
   "History summarization". A stopgap until Chapter 12's context budget.
 - `AuthorityGate` - a custom `AgentMiddleware` with `wrap_tool_call` that
-  logs every tool call and hard-blocks `set_ticket_status(..., "resolved")`
-  pending human approval. See "Gating the authority surface (custom
-  middleware)". This enforces the authority surface from Chapter 7.
-- `approval` - a `HumanInTheLoopMiddleware` wired to pause before
-  `set_ticket_status`. See "Human approval, as a placeholder" - wiring it is
-  one line, but it cannot actually suspend a run without the checkpointer
-  Chapter 9 introduces, so it is inert here.
+  logs every tool call that reaches the tools node and refuses
+  `set_ticket_status(..., "resolved")` unless a human approved that exact
+  call. See "Gating the authority surface (custom middleware)". This
+  enforces the authority surface from Chapter 7.
+- `approval` - a `RecordingApproval`, a `HumanInTheLoopMiddleware` that
+  pauses in `after_model` on any `set_ticket_status` call, before the tools
+  node runs, and then writes the ids of the calls the human approved (or
+  edited) to the `approved_calls` state key. `AuthorityGate` reads that
+  key: `HumanInTheLoopMiddleware` itself leaves an approved call exactly as
+  it leaves an auto-approved one, so without the record the gate could not
+  tell them apart. See "Human approval, as a placeholder". Without a
+  checkpointer the pause stops the run but can never resume it; Chapter 9
+  adds the checkpointer and Chapter 11 operates the pause.
 
 `atlas/agent.py`'s `resolve_agent` composes these four in
 `[pii, summarizer, AuthorityGate(), approval]` - list order is nesting
@@ -45,9 +51,11 @@ scanned), and `redact_email` (built from the same compiled pattern) is what
 import logging
 import re
 from collections.abc import Callable
+from typing import Any, NotRequired
 
 from langchain.agents.middleware import (
     AgentMiddleware,
+    AgentState,
     HumanInTheLoopMiddleware,
     PIIMiddleware,
     SummarizationMiddleware,
@@ -55,11 +63,12 @@ from langchain.agents.middleware import (
 )
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import ToolMessage
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 log = logging.getLogger("atlas")
 
-# --- PII redaction: mask email addresses in, and again out. ----------------
+# --- PII redaction: redact email addresses in, and again out. ----------------
 # One PIIMiddleware instance covers both directions - two separate instances
 # for the same pii_type collide on create_agent's duplicate-middleware check
 # (both resolve to the name "PIIMiddleware[email]"). See the module docstring.
@@ -105,7 +114,7 @@ _NEEDS_APPROVAL = {"set_ticket_status"}
 
 
 class AuthorityGate(AgentMiddleware):
-    """Log every tool call; block terminal ticket writes pending approval."""
+    """Log every tool call; refuse a terminal ticket write no human approved."""
 
     def wrap_tool_call(
         self,
@@ -117,15 +126,46 @@ class AuthorityGate(AgentMiddleware):
         if name in _NEEDS_APPROVAL and request.tool_call["args"].get(
             "status"
         ) == "resolved":
-            return ToolMessage(  # <2>
-                "Blocked: marking a ticket resolved requires human approval.",
-                tool_call_id=request.tool_call["id"],
-                status="error",
-            )
-        return handler(request)  # <3>
+            approved = request.state.get("approved_calls", [])  # <2>
+            if request.tool_call["id"] not in approved:
+                return ToolMessage(  # <3>
+                    "Blocked: marking a ticket resolved requires human approval.",
+                    tool_call_id=request.tool_call["id"],
+                    status="error",
+                )
+        return handler(request)  # <4>
 
 
-# --- Human approval, as a placeholder: inert until Ch 9's checkpointer. ----
-approval = HumanInTheLoopMiddleware(
+# --- Human approval: pause, then record what the human let through. --------
+# Without a checkpointer the pause stops the run but can never resume it
+# (Ch 9 adds the checkpointer; Ch 11 operates the pause).
+
+
+class ApprovalState(AgentState):
+    approved_calls: NotRequired[list[str]]  # tool-call ids a human let through
+
+
+class RecordingApproval(HumanInTheLoopMiddleware):
+    """Pause for a human, then record which paused calls went ahead."""
+
+    state_schema = ApprovalState
+
+    def after_model(
+        self, state: ApprovalState, runtime: Runtime
+    ) -> dict[str, Any] | None:
+        update = super().after_model(state, runtime)  # <1>
+        if update is None:
+            return None
+        ai_msg, *answered = update["messages"]  # <2>
+        answered_ids = {m.tool_call_id for m in answered}
+        approved = [
+            call["id"]
+            for call in ai_msg.tool_calls
+            if call["name"] in self.interrupt_on and call["id"] not in answered_ids
+        ]
+        return {**update, "approved_calls": approved}  # <3>
+
+
+approval = RecordingApproval(
     interrupt_on={"set_ticket_status": True},  # pause before this tool runs
 )

@@ -65,7 +65,8 @@ def test_resolve_agent_wires_chapter_8s_middleware_stack():
     each hook-based middleware (compiling, not invoking, needs no live model
     call). PIIMiddleware and SummarizationMiddleware attach before_model
     hooks; PIIMiddleware also attaches an after_model hook; and
-    HumanInTheLoopMiddleware attaches after_model. AuthorityGate's
+    `approval` (a RecordingApproval, Chapter 8's HumanInTheLoopMiddleware
+    subclass) attaches after_model. AuthorityGate's
     wrap_tool_call wraps the "tools" node in place rather than adding a
     node, so it is not visible here - see tests/test_middleware.py."""
     node_names = set(resolve_agent.nodes.keys())
@@ -73,7 +74,7 @@ def test_resolve_agent_wires_chapter_8s_middleware_stack():
     assert "PIIMiddleware[email].before_model" in node_names
     assert "PIIMiddleware[email].after_model" in node_names
     assert "SummarizationMiddleware.before_model" in node_names
-    assert "HumanInTheLoopMiddleware.after_model" in node_names
+    assert "RecordingApproval.after_model" in node_names
 
 
 def test_resolve_agent_carries_the_chapter_12_context_budget():
