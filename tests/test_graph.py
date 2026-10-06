@@ -246,7 +246,11 @@ def test_answer_calls_compose_answer_and_wraps_its_result_in_a_delta(monkeypatch
 
     delta = answer(_state(messages=["hi"], retrieved=["hit-1"]))
 
-    assert delta == {"messages": ["reply"]}
+    # Wrapped in an AIMessage: add_messages would coerce a bare str into a
+    # HumanMessage and file Atlas's answer as a user turn.
+    [message] = delta["messages"]
+    assert isinstance(message, AIMessage)
+    assert message.content == "reply"
 
 
 def test_retrieve_async_offloads_the_blocking_call_via_asyncio_to_thread(monkeypatch):
@@ -348,8 +352,8 @@ def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
     monkeypatch.setattr(
         graph_module,
         "compose_answer",
-        lambda messages, retrieved: AIMessage(
-            content="Refunds are available within 30 days of purchase."
+        lambda messages, retrieved: (
+            "Refunds are available within 30 days of purchase."
         ),
     )
 
@@ -360,6 +364,7 @@ def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
 
     assert len(result["messages"]) == 2
     assert result["messages"][0].content == "refund?"
+    assert isinstance(result["messages"][-1], AIMessage)
     assert result["messages"][-1].content == (
         "Refunds are available within 30 days of purchase."
     )
@@ -417,13 +422,16 @@ def test_an_off_menu_triage_route_escalates_without_ever_reaching_a_bad_node(
 
 def test_retry_policy_is_attached_to_the_retrieve_node():
     """First look at durable execution (Chapter 10): retrieve carries a
-    RetryPolicy so a transient ConnectionError re-runs the node instead of
-    failing the whole run."""
+    RetryPolicy so a transient failure re-runs the node instead of failing
+    the whole run. Chapter 4 drops the narrowed retry_on=(ConnectionError,)
+    it first shows, so the policy keeps the default predicate."""
+    from langgraph.types import default_retry_on
+
     pregel_node = graph.nodes["retrieve"]
 
     assert pregel_node.retry_policy is not None
     assert pregel_node.retry_policy[0].max_attempts == 3
-    assert pregel_node.retry_policy[0].retry_on == (ConnectionError,)
+    assert pregel_node.retry_policy[0].retry_on is default_retry_on
 
 
 # --- Chapter 10: durable execution, the checkpoint membrane, refund -------

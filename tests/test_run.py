@@ -73,10 +73,8 @@ def test_run_two_turns_restores_history_on_the_same_thread(monkeypatch):
     monkeypatch.setattr(
         graph_module,
         "compose_answer",
-        lambda messages, retrieved: {
-            "role": "assistant",
-            "content": "Yes, two weeks is within policy.",
-        },
+        # compose_answer returns a str; `answer` wraps it in an AIMessage.
+        lambda messages, retrieved: "Yes, two weeks is within policy.",
     )
 
     result = run_two_turns("test-thread-two-turns")

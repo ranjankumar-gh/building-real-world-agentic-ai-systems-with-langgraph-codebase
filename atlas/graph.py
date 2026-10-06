@@ -220,7 +220,9 @@ def route_after_retrieve(
 
 def answer(state: AtlasState) -> dict:
     reply = compose_answer(state["messages"], state["retrieved"])
-    return {"messages": [reply]}
+    # compose_answer returns a str, and add_messages coerces a bare str into a
+    # HumanMessage - wrap it so the reply is recorded as the assistant's turn.
+    return {"messages": [AIMessage(content=reply)]}
 
 
 def escalate(state: AtlasState) -> dict:
@@ -380,8 +382,12 @@ def _make_builder(
         retrieve,
         # First look at durable execution (full treatment: Chapter 10). Safe
         # here because retrieve is a read; do not add a retry_policy to a
-        # side-effecting node without the discipline Chapter 10 covers.
-        retry_policy=RetryPolicy(max_attempts=3, retry_on=(ConnectionError,)),
+        # side-effecting node without the discipline Chapter 10 covers. The
+        # chapter first shows retry_on=(ConnectionError,) as the narrowing to
+        # avoid, then drops it: the default predicate also retries a
+        # knowledge-base 5xx and a provider SDK error, which that whitelist
+        # of one would decline.
+        retry_policy=RetryPolicy(max_attempts=3),
     )
     b.add_node("answer", resolve_node)
     b.add_node("escalate", escalate)

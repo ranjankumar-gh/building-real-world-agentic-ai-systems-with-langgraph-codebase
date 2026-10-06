@@ -78,6 +78,39 @@ def test_the_default_predicate_retries_server_errors_but_not_client_errors(
     assert default_retry_on(error) is expected
 
 
+def test_the_default_predicate_retries_a_provider_4xx() -> None:
+    """The 4xx decline applies only to httpx/requests HTTP errors. A provider
+    SDK exception falls through to "retry", so anthropic.BadRequestError, a
+    400, is re-run by the default."""
+    import anthropic
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    error = anthropic.BadRequestError(
+        message="bad request",
+        response=httpx.Response(400, request=request),
+        body=None,
+    )
+
+    assert default_retry_on(error) is True
+
+
+def test_the_provider_connection_failure_is_not_a_connection_error() -> None:
+    """anthropic.APIConnectionError derives from anthropic.APIError, so
+    retry_on=(ConnectionError,) does not catch it either."""
+    import anthropic
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    error = anthropic.APIConnectionError(request=request)
+
+    assert not isinstance(error, ConnectionError)
+    assert default_retry_on(error) is True
+
+
+def test_the_default_predicate_declines_a_bare_timeout_error() -> None:
+    """OSError is in the decline list, and TimeoutError is an OSError."""
+    assert default_retry_on(TimeoutError()) is False
+
+
 def test_triage_carries_a_retry_policy_that_keeps_the_default_predicate() -> None:
     """Ch4 says a retry_policy is safe for a read, and triage is a read: it
     makes the first live model call in the graph and changes nothing. It
