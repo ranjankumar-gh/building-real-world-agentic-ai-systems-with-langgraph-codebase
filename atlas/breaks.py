@@ -8,7 +8,14 @@ reproduced with no API key and no flakiness.
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
-from atlas.naive import SYSTEM_PROMPT, TOOLS_BY_NAME, refund_calls, run, text_of
+from atlas.naive import (
+    SYSTEM_PROMPT,
+    TOOLS_BY_NAME,
+    ChatModel,
+    refund_calls,
+    run,
+    text_of,
+)
 
 
 class ScriptedModel:
@@ -25,7 +32,7 @@ class ScriptedModel:
         return self._responses[idx]
 
 
-def run_with_watchdog(user_text, model, limit=25) -> str:
+def run_with_watchdog(user_text: str, model: ChatModel, limit: int = 25) -> str:
     """The same loop as run(), capped only so a non-terminating agent can be
     observed rather than hang. The cap is a diagnostic, not a solution."""
     messages = [SystemMessage(SYSTEM_PROMPT), HumanMessage(user_text)]
@@ -40,7 +47,7 @@ def run_with_watchdog(user_text, model, limit=25) -> str:
     return f"NEVER TERMINATED: still looping at step {limit}"
 
 
-def run_swallowing(user_text, model) -> str:
+def run_swallowing(user_text: str, model: ChatModel) -> str:
     """The naive 'fix' for tool errors: catch and continue. It converts a loud
     failure into a silent, confident wrong answer."""
     messages = [SystemMessage(SYSTEM_PROMPT), HumanMessage(user_text)]
@@ -93,7 +100,8 @@ if __name__ == "__main__":
         AIMessage(content="All set - your refund has been issued. Anything else?"),
     ])
 
-    TOOLS_BY_NAME["issue_refund"] = issue_refund_broken  # the backend is down
+    refund_calls.clear()   # a fresh run: Failure 1 refunded T-1001 25 times
+    TOOLS_BY_NAME["issue_refund"] = issue_refund_broken   # the backend is down
     print(run_swallowing("Refund T-1001 please", confirm))
     # -> All set - your refund has been issued. Anything else?
     print("refund actually issued?", "T-1001" in refund_calls)
