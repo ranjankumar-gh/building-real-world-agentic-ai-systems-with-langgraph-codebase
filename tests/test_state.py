@@ -11,7 +11,7 @@ from atlas.state import AtlasState, Doc, dedup_by_id
 
 
 def _doc(doc_id: str, text: str = "") -> Doc:
-    return {"id": doc_id, "text": text}
+    return {"id": doc_id, "text": text, "score": 0.0}
 
 
 def test_dedup_by_id_drops_duplicate_ids_and_preserves_order():
@@ -25,7 +25,7 @@ def test_dedup_by_id_drops_duplicate_ids_and_preserves_order():
     assert merged[1]["text"] == "b"
 
 
-def test_dedup_by_id_is_order_independent_for_disjoint_inputs():
+def test_dedup_by_id_yields_same_set_for_disjoint_inputs_in_either_order():
     current = [_doc("1"), _doc("2")]
 
     merged_ab = dedup_by_id(current, [_doc("3"), _doc("4")])
