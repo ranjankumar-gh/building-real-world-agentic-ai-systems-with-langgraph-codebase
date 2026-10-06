@@ -65,7 +65,8 @@ is a real side-effecting node, so it earns the `retry_policy` Chapter 4
 forbade side-effecting nodes ("don't retry side-effecting nodes" meant "earn
 the retry via idempotency first," not "never retry") plus an `error_handler`
 (`refund_failed`) that compensates by routing to `escalate` once the retry
-policy stops (attempts exhausted, or an exception `retry_on` does not cover). `ALLOWED_ROUTES` grows to include `"refund"`. The idempotency key
+policy stops (attempts exhausted, or an exception `retry_on` does not
+cover). `ALLOWED_ROUTES` grows to include `"refund"`. The idempotency key
 and the idempotent operation itself live in `atlas/effects.py`, isolated
 from the graph so the side-effecting code is testable on its own -
 `refund_already_done` is the additive-migration-safe read
