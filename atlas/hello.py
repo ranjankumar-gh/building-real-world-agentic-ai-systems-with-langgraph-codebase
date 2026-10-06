@@ -41,3 +41,11 @@ agent = create_agent(                       # <1>
 #    init_chat_model, so switching providers is a one-line change.
 # 3. system_prompt=, not prompt=. This is the 1.x rename; the old keyword is
 #    the 0.x tell.
+
+
+if __name__ == "__main__":
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "What's the refund window?"}]}
+    )
+    print(result["messages"][-1].content)
+    # -> Refunds are available within 30 days of purchase.
