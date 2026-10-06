@@ -4,7 +4,7 @@ See Chapter 3, "Thinking in Graphs" - "Whiteboarding Atlas". Every node here obe
 the state-transition discipline: read state, return a delta, decide nothing about
 what runs next. Routing is a separate, pure function that lives on the edge, not
 inside a node body. Chapter 4 wires this into a real, running StateGraph
-(atlas/graph.py); Chapter 6 turns route_after_triage into a conditional edge and
+(atlas/graph.py); Chapter 6 turns route_from_triage into a conditional edge and
 adds the escalate branch and the bounded retrieve retry.
 
 The helpers imported below (classify, search_kb, compose_answer) were stubs in
@@ -54,9 +54,9 @@ def escalate(state: AtlasState) -> dict:
     return {"ticket": {"status": "escalated"}}
 
 
-def route_after_triage(
+def route_from_triage(
     state: AtlasState,
-) -> Literal["retrieve", "answer", "escalate"]:
+) -> Literal["answer", "retrieve", "escalate"]:
     """Control flow on the edge: read state, return the next node's name.
     It decides nothing the node bodies should decide. Wired in Chapter 6."""
     return state["route"]

@@ -15,7 +15,7 @@ from atlas.graph_sketch import (
     answer,
     escalate,
     retrieve,
-    route_after_triage,
+    route_from_triage,
     triage,
 )
 
@@ -35,9 +35,9 @@ def test_escalate_returns_a_delta_only_and_does_not_touch_the_input_state():
     assert state["ticket"] is None  # escalate did not mutate what it read
 
 
-def test_route_after_triage_reads_the_route_key_and_decides_nothing_else():
+def test_route_from_triage_reads_the_route_key_and_decides_nothing_else():
     for route in ("answer", "retrieve", "escalate"):
-        assert route_after_triage(_state(route=route)) == route
+        assert route_from_triage(_state(route=route)) == route
 
 
 def test_triage_calls_classify_and_wraps_its_result_in_a_delta(monkeypatch):
