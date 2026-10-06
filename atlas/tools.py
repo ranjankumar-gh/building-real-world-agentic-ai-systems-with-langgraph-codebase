@@ -2,7 +2,7 @@
 
 See "Building Atlas's real tools". This module replaces two of the three
 `atlas.helpers` stubs with real implementations against seeded, in-repo
-backends (Appendix G): `search_kb` (the knowledge-base lookup) and the
+backends (Appendix A): `search_kb` (the knowledge-base lookup) and the
 ticket operations `lookup_ticket` / `set_ticket_status` (new, narrow tools -
 `atlas.helpers` never had a ticket stub to replace). `KnowledgeBaseUnavailable`
 also moves here, next to the tool that can actually raise it.
@@ -36,7 +36,7 @@ from typing import Literal
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 
-# Seeded, mockable backend - ships in the companion repo (Appendix G).
+# Seeded, mockable backend - ships in the companion repo (Appendix A).
 _KB: dict[str, str] = {
     "refund window": "Refunds are available within 30 days of purchase.",
     "reset password": "Use the 'Forgot password' link on the sign-in page.",
