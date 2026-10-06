@@ -14,7 +14,10 @@ LastValue channels for the bounded retrieval retry and its recovery path:
 `retrieve_attempts` (the explicit loop guard `route_after_retrieve` checks
 instead of leaning on the recursion limit) and `error` (set only when
 `retrieve` catches a `KnowledgeBaseUnavailable` failure, read with
-`state.get("error")` since it is not written on every path).
+`state.get("error")` since it is not written on every path). `triage`
+resets both (`retrieve_attempts=0`, `error=None`) at the start of every
+question, so the cap stays per question once a checkpointer carries state
+from one turn to the next.
 
 Chapter 10, "Durable Execution, Long-Running Workflows, and State
 Migration", adds `refund_done` - ADDITIVE, on purpose: a checkpoint written
@@ -62,6 +65,6 @@ class AtlasState(TypedDict):
     retrieved: Annotated[list[Doc], dedup_by_id]  # many writers, merged
     ticket: dict | None  # one writer per step, guarded (LastValue)
     route: str  # one writer per step, guarded (LastValue)
-    retrieve_attempts: int  # the explicit loop guard; LastValue (only retrieve writes it)
-    error: str | None  # recorded tool failure; LastValue (only retrieve writes it)
+    retrieve_attempts: int  # the loop guard; triage resets it, retrieve counts
+    error: str | None  # a tool failure; triage clears it, retrieve records it
     refund_done: bool  # NEW this chapter - additive, read with a default

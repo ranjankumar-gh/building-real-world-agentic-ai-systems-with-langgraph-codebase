@@ -18,7 +18,8 @@ chapter), `add_conditional_edges` replaces the fixed triage->retrieve and
 retrieve->answer edges, and a new `escalate` node gives the graph a graceful
 exit. `retrieve` is now a bounded retry cycle guarded by the explicit
 `retrieve_attempts` state counter - not by LangGraph's `recursion_limit` -
-and records a `KnowledgeBaseUnavailable` failure in state instead of crashing
+which `triage` resets (with `error`) at the start of every question, and
+records a `KnowledgeBaseUnavailable` failure in state instead of crashing
 or answering on top of it. `triage_with_command` is the chapter's `Command`
 alternative: update state and route in one move. It is intentionally not
 wired into `builder` below, the same way Chapter 4's `retrieve_async` is
@@ -152,9 +153,16 @@ RETRIEVE_TIMEOUT = TimeoutPolicy(run_timeout=30.0, idle_timeout=10.0)
 
 
 def triage(state: AtlasState) -> dict:
+    """Chapter 6, "The bounded retry": triage runs once at the start of every
+    question, so it is where the per-question loop guard starts over. Without
+    the reset, a checkpointed thread (Chapter 9 onward) carries
+    `retrieve_attempts` and `error` into the next question: that question
+    starts at the cap and gets no retries, and a stale error escalates it
+    outright."""
     decision = classify(state["messages"])  # typed; route is already constrained
     route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
-    return {"route": route}
+    # a new question gets a fresh guard: no attempts yet, no recorded failure
+    return {"route": route, "retrieve_attempts": 0, "error": None}
 
 
 def triage_with_command(
@@ -166,7 +174,8 @@ def triage_with_command(
     default, since it keeps routing visible on a separate edge."""
     decision = classify(state["messages"])
     route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
-    return Command(update={"route": route}, goto=route)
+    update = {"route": route, "retrieve_attempts": 0, "error": None}
+    return Command(update=update, goto=route)
 
 
 def route_from_triage(
@@ -456,7 +465,7 @@ def build_graph(
         def triage_node(state: AtlasState) -> dict:
             ai = model.invoke(state["messages"])
             route = ai.content if ai.content in ALLOWED_ROUTES else "escalate"
-            return {"route": route}
+            return {"route": route, "retrieve_attempts": 0, "error": None}
 
     return _make_builder(
         triage_node, resolve_node=resolve_node or answer

@@ -114,7 +114,7 @@ def test_triage_calls_classify_and_wraps_its_result_in_a_delta(monkeypatch):
 
     delta = triage(_state(messages=["hi"]))
 
-    assert delta == {"route": "retrieve"}
+    assert delta == {"route": "retrieve", "retrieve_attempts": 0, "error": None}
 
 
 def test_triage_falls_back_to_escalate_when_the_model_proposes_an_off_menu_route(
@@ -131,7 +131,7 @@ def test_triage_falls_back_to_escalate_when_the_model_proposes_an_off_menu_route
 
         delta = triage(_state(messages=["hi"]))
 
-        assert delta == {"route": "escalate"}
+        assert delta["route"] == "escalate"
 
 
 def test_triage_never_proposes_a_route_outside_the_allowed_set(monkeypatch):
@@ -155,7 +155,7 @@ def test_triage_with_command_updates_state_and_names_the_next_node_together(
     result = triage_with_command(_state(messages=["hi"]))
 
     assert isinstance(result, Command)
-    assert result.update == {"route": "retrieve"}
+    assert result.update == {"route": "retrieve", "retrieve_attempts": 0, "error": None}
     assert result.goto == "retrieve"
 
 
@@ -168,7 +168,7 @@ def test_triage_with_command_also_falls_back_to_escalate_on_an_off_menu_route(
 
     result = triage_with_command(_state(messages=["hi"]))
 
-    assert result.update == {"route": "escalate"}
+    assert result.update["route"] == "escalate"
     assert result.goto == "escalate"
 
 
@@ -374,8 +374,9 @@ def test_a_query_that_keeps_coming_back_empty_retries_then_escalates_gracefully(
     monkeypatch,
 ):
     """The chapter's central claim, exercised end to end: an empty
-    retrieval retries exactly MAX_RETRIEVE_ATTEMPTS times and then escalates -
-    it never raises GraphRecursionError."""
+    retrieval runs retrieve exactly MAX_RETRIEVE_ATTEMPTS times (the first
+    attempt plus two retries) and then escalates - it never raises
+    GraphRecursionError."""
     monkeypatch.setattr(
         graph_module, "classify", lambda messages: _decision("retrieve")
     )
@@ -386,6 +387,80 @@ def test_a_query_that_keeps_coming_back_empty_retries_then_escalates_gracefully(
 
     assert result["retrieve_attempts"] == MAX_RETRIEVE_ATTEMPTS
     assert result["ticket"] == {"status": "escalated"}
+
+
+def test_triage_resets_the_loop_guard_for_every_new_question(monkeypatch):
+    """Chapter 6, "The bounded retry": triage starts each question with a
+    fresh guard, whatever the previous question left in state."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    stale = _state(
+        messages=["hi"],
+        retrieve_attempts=MAX_RETRIEVE_ATTEMPTS,
+        error="knowledge base is down",
+    )
+
+    delta = triage(stale)
+
+    assert delta["retrieve_attempts"] == 0
+    assert delta["error"] is None
+
+
+def test_a_second_question_on_the_same_thread_gets_its_own_retries(monkeypatch):
+    """The per-question cap survives a checkpointer. `graph` is compiled on
+    an InMemorySaver, so the second invoke on one thread_id starts from the
+    first question's saved state. Without triage's reset it would start at
+    retrieve_attempts == MAX_RETRIEVE_ATTEMPTS, run retrieve once, and
+    escalate with no retry."""
+    calls: list[str] = []
+
+    def _empty_kb(messages):
+        calls.append("search")
+        return []
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    monkeypatch.setattr(graph_module, "search_kb", _empty_kb)
+    config = {"configurable": {"thread_id": "test-thread-guard-per-question"}}
+
+    for question in ("first question", "second question"):
+        calls.clear()
+        result = graph.invoke(
+            {"messages": [{"role": "user", "content": question}]}, config
+        )
+
+        assert len(calls) == MAX_RETRIEVE_ATTEMPTS
+        assert result["retrieve_attempts"] == MAX_RETRIEVE_ATTEMPTS
+        assert result["ticket"] == {"status": "escalated"}
+
+
+def test_a_recorded_failure_does_not_escalate_the_next_question(monkeypatch):
+    """A stale `error` from one question must not escalate the next one on
+    the same thread: triage clears it, so the second question reaches the
+    (now healthy) knowledge base and answers."""
+    def _boom(messages):
+        raise KnowledgeBaseUnavailable("knowledge base is down")
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved: "the answer"
+    )
+    config = {"configurable": {"thread_id": "test-thread-stale-error"}}
+
+    monkeypatch.setattr(graph_module, "search_kb", _boom)
+    first = graph.invoke({"messages": [{"role": "user", "content": "q1"}]}, config)
+    assert first["error"] == "knowledge base is down"
+
+    hit = {"id": "doc-1", "text": "Refunds within 30 days.", "score": 1.0}
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [hit])
+    second = graph.invoke({"messages": [{"role": "user", "content": "q2"}]}, config)
+
+    assert second["error"] is None
+    assert second["messages"][-1].content == "the answer"
 
 
 def test_a_failing_knowledge_base_routes_to_escalate_instead_of_a_fake_answer(

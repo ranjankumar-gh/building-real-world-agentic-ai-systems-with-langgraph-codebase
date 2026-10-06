@@ -87,4 +87,5 @@ def test_stream_atlas_carries_the_route_triage_decided_in_its_updates_payload(
         for event in events
         if event["kind"] == "updates" and "triage" in event["data"]
     ]
-    assert triage_updates == [{"route": "escalate"}]
+    # triage's update also carries the Chapter 6 per-question guard reset
+    assert [update["route"] for update in triage_updates] == ["escalate"]
