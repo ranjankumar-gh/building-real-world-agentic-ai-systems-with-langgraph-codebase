@@ -3,8 +3,11 @@
 See Chapter 2, "Hello-world Atlas". Direct replacement for Chapter 1's
 atlas/naive.py - same job, no hand-rolled while loop. Still not durable
 (no checkpointer; Chapter 9), not supervised (no HITL; Chapter 11), and not
-traced (Chapter 20) - create_agent makes the agent correct, not yet
-production-ready.
+traced (Chapter 20). create_agent hands the loop to the runtime, but its
+only loop bound is a 9,999-step recursion limit and a raising tool still
+ends the run (Chapter 7 adds the error policy).
+
+Run it with `uv run python -m atlas.hello` (needs ANTHROPIC_API_KEY).
 """
 
 from langchain.agents import create_agent
