@@ -38,12 +38,13 @@ still validates `.route` against `ALLOWED_ROUTES` (the routing boundary
 holds; structured output narrows the input, it does not dissolve the
 boundary). `search_kb` also went real in that chapter, as a `@tool` in
 `atlas/tools.py` - along with `KnowledgeBaseUnavailable`, imported from
-there now instead of atlas.helpers - but `retrieve` and `answer` below are
-not yet rewired to call it: `answer` is an injectable seam via
-`build_graph(resolve_node=...)` so a middleware-equipped agent can be mounted
-there; see Chapter 17's mounting section for the pattern. Until a custom node
-is mounted, `answer` calls the atlas.helpers stub for `compose_answer` shape
-continuity. See atlas/helpers.py's module docstring.
+there now instead of atlas.helpers - but `retrieve` and `answer` below still
+call the atlas.helpers functions, not the tool directly. At the chapter tags
+those functions are stubs; in the finished repo they are thin, model-free
+adapters onto the Chapter 7 tool (see atlas/helpers.py's module docstring), so
+the retrieve/answer path runs end to end. `answer` is also an injectable seam
+via `build_graph(resolve_node=...)` so a middleware-equipped agent can be
+mounted there; see Chapter 17's mounting section for the pattern.
 
 Chapter 9, "Persistence and Checkpointing", compiles `graph` onto a
 checkpointer so state survives past a single `invoke` call. `InMemorySaver`
@@ -166,7 +167,7 @@ def triage(state: AtlasState) -> dict:
     writer in its superstep."""
     decision = classify(state["messages"])  # typed; route is already constrained
     route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
-    # a new question gets a fresh guard: no attempts yet, no recorded failure
+    # a new question starts clean: no attempts, no failure, no documents
     return {
         "route": route,
         "retrieve_attempts": 0,

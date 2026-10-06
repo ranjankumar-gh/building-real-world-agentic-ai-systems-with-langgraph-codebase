@@ -189,8 +189,10 @@ resolve_agent = create_agent(
 #    `after_model`, not `wrap_tool_call` - confirmed by reading
 #    `langchain.agents.middleware.human_in_the_loop` directly, not
 #    assumed - so it never nests with these four at all: a human
-#    rejection is resolved in `after_model`, which removes the rejected
-#    tool_call from the `AIMessage` before the `tools` node runs, so it
+#    rejection is resolved in `after_model`, which keeps the rejected
+#    tool_call on the `AIMessage` and appends an error `ToolMessage`
+#    answering it (langchain 1.3.0). The agent routes to the `tools` node
+#    only for calls with no answering `ToolMessage`, so a rejected call
 #    never reaches ANY `wrap_tool_call` middleware, `InjectionGuard`
 #    included, regardless of list position. Separately, among the
 #    `wrap_model_call` middleware, `TenantBudgetGuard` sits inside

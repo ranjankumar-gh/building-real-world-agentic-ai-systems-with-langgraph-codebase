@@ -16,7 +16,8 @@ real: the validated version now lives in `atlas/triage.py`, and
 `KnowledgeBaseUnavailable` moves too, into `atlas/tools.py`, alongside the
 real `search_kb` tool that chapter builds - a standalone, tool-calling
 `create_agent` (`atlas/agent.py`) can now actually search the knowledge base
-and act on tickets. `compose_answer` stays a stub past Chapter 7.
+and act on tickets. At the Chapter 7 tag `search_kb` and `compose_answer`
+here are still stubs; the finished repo replaces both with the adapters below.
 
 In the finished repo, `search_kb` and `compose_answer` are the adapters between
 the graph's node calling convention (list of messages in, list of `Doc` out) and
