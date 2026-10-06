@@ -50,7 +50,7 @@ scanned), and `redact_email` (built from the same compiled pattern) is what
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, NotRequired
 
 from langchain.agents.middleware import (
@@ -116,11 +116,7 @@ _NEEDS_APPROVAL = {"set_ticket_status"}
 class AuthorityGate(AgentMiddleware):
     """Log every tool call; refuse a terminal ticket write no human approved."""
 
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], ToolMessage | Command],
-    ) -> ToolMessage | Command:
+    def _refusal(self, request: ToolCallRequest) -> ToolMessage | None:
         name = request.tool_call["name"]
         log.info("tool_call name=%s args=%s", name, request.tool_call["args"])  # <1>
         if name in _NEEDS_APPROVAL and request.tool_call["args"].get(
@@ -133,7 +129,23 @@ class AuthorityGate(AgentMiddleware):
                     tool_call_id=request.tool_call["id"],
                     status="error",
                 )
-        return handler(request)  # <4>
+        return None
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        refusal = self._refusal(request)
+        return refusal if refusal is not None else handler(request)  # <4>
+
+    async def awrap_tool_call(  # <5>
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        refusal = self._refusal(request)
+        return refusal if refusal is not None else await handler(request)
 
 
 # --- Human approval: pause, then record what the human let through. --------

@@ -210,6 +210,59 @@ def test_a_resolve_the_approval_layer_does_not_pause_on_is_blocked():
     assert _tool_results(out)[0].status == "error"
 
 
+def _aresolve_run(middleware: list, decision: dict | None) -> dict:
+    """`_resolve_run` on the async path: `ainvoke` makes the tools node call
+    `awrap_tool_call`, which raises NotImplementedError on a middleware that
+    defines only the sync hook."""
+    import asyncio
+
+    async def go() -> dict:
+        _ran.clear()
+        call = {
+            "name": "set_ticket_status",
+            "id": "call-1",
+            "args": {"ticket_id": "T-1001", "status": "resolved"},
+        }
+        model = _ScriptedModel(
+            messages=iter([AIMessage("", tool_calls=[call]), AIMessage("done")])
+        )
+        agent = create_agent(
+            model=model,
+            tools=[set_ticket_status],
+            middleware=middleware,
+            checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "t"}}
+        out = await agent.ainvoke(
+            {"messages": [("user", "resolve T-1001")]}, config
+        )
+        if decision is not None:
+            assert "__interrupt__" in out
+            out = await agent.ainvoke(
+                Command(resume={"decisions": [decision]}), config
+            )
+        return out
+
+    return asyncio.run(go())
+
+
+def test_an_approved_resolve_runs_through_the_gate_under_ainvoke():
+    out = _aresolve_run(
+        [pii, summarizer, AuthorityGate(), approval], {"type": "approve"}
+    )
+
+    assert _ran == [{"ticket_id": "T-1001", "status": "resolved"}]
+    assert out["approved_calls"] == ["call-1"]
+    assert _tool_results(out)[0].status == "success"
+
+
+def test_an_unapproved_resolve_is_blocked_under_ainvoke():
+    out = _aresolve_run([AuthorityGate()], None)
+
+    assert _ran == []
+    assert "approval" in _tool_results(out)[0].content
+
+
 # --- Chapter 8, Exercise 1: order decides which layers read the raw email,
 # --- not what the model receives.
 
