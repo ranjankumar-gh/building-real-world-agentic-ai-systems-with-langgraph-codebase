@@ -13,10 +13,8 @@ score and cap them to the retrieved slice, instead of handing the model
 every document `atlas.graph`'s `retrieve` node fetched. The richer,
 long-term-memory half of select is Chapters 13-14.
 
-`atlas/state.py`'s `Doc` gained a `score: float` field this chapter -
-additive, the same migration discipline Chapter 10 used for `refund_done`:
-existing code that only reads `doc["id"]`/`doc["text"]` is unaffected, and
-`select_docs` is the first reader of the new field."""
+`atlas/state.py`'s `Doc` has carried `score: float` since Chapter 5 (set
+by the retriever); `select_docs` is its first reader."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
