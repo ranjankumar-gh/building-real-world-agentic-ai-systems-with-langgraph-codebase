@@ -323,7 +323,7 @@ def refund_failed(state: AtlasState) -> Command:
     # reversed a prior action, that reversal would need its own
     # idempotency key - compensation is a side effect too.
     return Command(
-        update={"error": "refund failed after retries; needs manual review"},
+        update={"error": "refund failed; needs manual review"},
         goto="escalate",
     )
 

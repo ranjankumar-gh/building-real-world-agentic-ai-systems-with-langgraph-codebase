@@ -671,7 +671,7 @@ def test_refund_failed_compensates_by_recording_the_error_and_routing_to_escalat
 
     assert isinstance(result, Command)
     assert result.update == {
-        "error": "refund failed after retries; needs manual review"
+        "error": "refund failed; needs manual review"
     }
     assert result.goto == "escalate"
 
@@ -744,7 +744,7 @@ def test_a_refund_that_keeps_failing_exhausts_retries_then_escalates_end_to_end(
 
     assert len(attempts) == 3  # max_attempts on the refund node's RetryPolicy
     assert result["ticket"] == {"status": "escalated"}
-    assert result["error"] == "refund failed after retries; needs manual review"
+    assert result["error"] == "refund failed; needs manual review"
 
 
 # --- Chapter 11: the approval gate ----------------------------------------
