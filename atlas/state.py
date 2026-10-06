@@ -16,7 +16,9 @@ instead of leaning on the recursion limit) and `error` (set only when
 `retrieve` catches a `KnowledgeBaseUnavailable` failure, read with
 `state.get("error")` since it is not written on every path). `triage`
 resets both (`retrieve_attempts=0`, `error=None`) at the start of every
-question, so the cap stays per question once a checkpointer carries state
+question, and empties `retrieved` with `Overwrite([])` - the reducer would
+otherwise merge an empty list into the last question's documents - so the
+cap and the documents stay per question once a checkpointer carries state
 from one turn to the next.
 
 Chapter 10, "Durable Execution, Long-Running Workflows, and State

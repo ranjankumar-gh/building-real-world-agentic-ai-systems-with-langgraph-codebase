@@ -49,10 +49,11 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from atlas import graph as graph_module
 from atlas.breaks import ScriptedModel
@@ -114,7 +115,12 @@ def test_triage_calls_classify_and_wraps_its_result_in_a_delta(monkeypatch):
 
     delta = triage(_state(messages=["hi"]))
 
-    assert delta == {"route": "retrieve", "retrieve_attempts": 0, "error": None}
+    assert delta == {
+        "route": "retrieve",
+        "retrieve_attempts": 0,
+        "error": None,
+        "retrieved": Overwrite([]),
+    }
 
 
 def test_triage_falls_back_to_escalate_when_the_model_proposes_an_off_menu_route(
@@ -155,7 +161,12 @@ def test_triage_with_command_updates_state_and_names_the_next_node_together(
     result = triage_with_command(_state(messages=["hi"]))
 
     assert isinstance(result, Command)
-    assert result.update == {"route": "retrieve", "retrieve_attempts": 0, "error": None}
+    assert result.update == {
+        "route": "retrieve",
+        "retrieve_attempts": 0,
+        "error": None,
+        "retrieved": Overwrite([]),
+    }
     assert result.goto == "retrieve"
 
 
@@ -405,6 +416,8 @@ def test_triage_resets_the_loop_guard_for_every_new_question(monkeypatch):
 
     assert delta["retrieve_attempts"] == 0
     assert delta["error"] is None
+    # retrieved has a reducer, so only an Overwrite can clear it
+    assert delta["retrieved"] == Overwrite([])
 
 
 def test_a_second_question_on_the_same_thread_gets_its_own_retries(monkeypatch):
@@ -461,6 +474,76 @@ def test_a_recorded_failure_does_not_escalate_the_next_question(monkeypatch):
 
     assert second["error"] is None
     assert second["messages"][-1].content == "the answer"
+
+
+def test_a_second_question_on_the_same_thread_starts_with_no_documents(
+    monkeypatch,
+):
+    """Without triage's Overwrite([]), dedup_by_id would merge the second
+    question's empty search into the first question's documents, and
+    route_after_retrieve would "answer" the second question from them."""
+    doc = {"id": "kb-1", "text": "Refunds within 30 days.", "score": 1.0}
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved: "the answer"
+    )
+    config = {"configurable": {"thread_id": "test-thread-retrieved-reset"}}
+
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [doc])
+    first = graph.invoke({"messages": [{"role": "user", "content": "q1"}]}, config)
+    assert first["retrieved"] == [doc]
+
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
+    second = graph.invoke({"messages": [{"role": "user", "content": "q2"}]}, config)
+
+    assert second["retrieved"] == []
+    assert second["ticket"] == {"status": "escalated"}
+
+
+def test_the_retrieved_reset_keeps_dedup_within_a_question(monkeypatch):
+    """The reset clears `retrieved` once, at triage; everything after it in
+    the same question still merges through dedup_by_id - a two-branch
+    fan-in in one superstep plus a later pass - on every question of a
+    checkpointed thread."""
+    doc_a = {"id": "a", "text": "A", "score": 1.0}
+    doc_b = {"id": "b", "text": "B", "score": 1.0}
+    doc_c = {"id": "c", "text": "C", "score": 1.0}
+    seen_at_fan_out: list[list[str]] = []
+
+    def branch_a(state: AtlasState) -> dict:
+        seen_at_fan_out.append([d["id"] for d in state["retrieved"]])
+        return {"retrieved": [doc_a, doc_b]}
+
+    def branch_b(state: AtlasState) -> dict:
+        return {"retrieved": [doc_b, doc_c]}
+
+    def later_pass(state: AtlasState) -> dict:
+        return {"retrieved": [doc_a, doc_c]}
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    b = StateGraph(AtlasState)
+    b.add_node("triage", triage)  # the real node: route plus the resets
+    b.add_node("branch_a", branch_a)
+    b.add_node("branch_b", branch_b)
+    b.add_node("later_pass", later_pass)
+    b.add_edge(START, "triage")
+    b.add_edge("triage", "branch_a")
+    b.add_edge("triage", "branch_b")
+    b.add_edge(["branch_a", "branch_b"], "later_pass")
+    b.add_edge("later_pass", END)
+    mini = b.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "test-thread-dedup-within"}}
+
+    for question in ("q1", "q2"):
+        result = mini.invoke(
+            {"messages": [{"role": "user", "content": question}]}, config
+        )
+        assert seen_at_fan_out[-1] == []
+        assert [d["id"] for d in result["retrieved"]] == ["a", "b", "c"]
 
 
 def test_a_failing_knowledge_base_routes_to_escalate_instead_of_a_fake_answer(
