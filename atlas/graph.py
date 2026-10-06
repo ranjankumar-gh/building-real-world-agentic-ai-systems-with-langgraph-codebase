@@ -64,8 +64,8 @@ Migration", is Atlas's first crossing of the checkpoint membrane: `refund`
 is a real side-effecting node, so it earns the `retry_policy` Chapter 4
 forbade side-effecting nodes ("don't retry side-effecting nodes" meant "earn
 the retry via idempotency first," not "never retry") plus an `error_handler`
-(`refund_failed`) that compensates by routing to `escalate` once retries are
-exhausted. `ALLOWED_ROUTES` grows to include `"refund"`. The idempotency key
+(`refund_failed`) that compensates by routing to `escalate` once the retry
+policy stops (attempts exhausted, or an exception `retry_on` does not cover). `ALLOWED_ROUTES` grows to include `"refund"`. The idempotency key
 and the idempotent operation itself live in `atlas/effects.py`, isolated
 from the graph so the side-effecting code is testable on its own -
 `refund_already_done` is the additive-migration-safe read
@@ -147,10 +147,10 @@ from atlas.triage import classify
 ALLOWED_ROUTES = ("answer", "retrieve", "escalate", "refund")
 MAX_RETRIEVE_ATTEMPTS = 3
 
-# Chapter 10's TimeoutPolicy example ("research", an async node bounded by a
-# hard wall clock plus an idle timeout). Atlas's real async node candidate is
-# retrieve_async, below - see tests/test_graph.py for the async-only
-# behavior this policy demonstrates.
+# Chapter 10's TimeoutPolicy example: a hard wall clock plus an idle timeout,
+# attached to Atlas's async node candidate, Chapter 4's retrieve_async, below
+# - see tests/test_graph.py for the async-only behavior this policy
+# demonstrates.
 RETRIEVE_TIMEOUT = TimeoutPolicy(run_timeout=30.0, idle_timeout=10.0)
 
 
@@ -265,7 +265,7 @@ def refund_already_done(state: AtlasState) -> bool:
     return state.get("refund_done", False)  # resumes old checkpoints safely
 
 
-def approval_gate(state: AtlasState) -> Command:
+def approval_gate(state: AtlasState) -> Command[Literal["refund", "escalate"]]:
     """Chapter 11: the approval gate, sitting BEFORE the membrane `refund`
     crosses. `interrupt()` suspends the run to the checkpointer and surfaces
     the proposed refund; the human's decision comes back as `decision`, the
@@ -424,8 +424,9 @@ def _make_builder(
         "refund",
         refund,
         # Chapter 10: safe now that refund is idempotent (earns the retry
-        # Chapter 4 forbade on side-effecting nodes). error_handler runs only
-        # after retries are exhausted and compensates by routing to escalate.
+        # Chapter 4 held back on side-effecting nodes). error_handler runs once
+        # the retry policy stops - retries exhausted, or an exception retry_on
+        # does not cover - and compensates by routing to escalate.
         retry_policy=RetryPolicy(max_attempts=3, retry_on=(RefundError,)),
         error_handler=refund_failed,
     )
@@ -456,7 +457,9 @@ def _make_builder(
     b.add_edge("refund", END)
     # approval_gate has no static outgoing edge - it always returns a
     # Command with goto="refund" or goto="escalate", the same
-    # dynamic-routing shape triage_with_command uses above.
+    # dynamic-routing shape triage_with_command uses above. Its
+    # Command[Literal["refund", "escalate"]] return type is the only place
+    # the graph learns those destinations, so get_graph() draws them.
     return b
 
 

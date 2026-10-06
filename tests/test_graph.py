@@ -834,6 +834,21 @@ def test_approval_gate_raises_on_an_unrecognized_decision_type(monkeypatch):
         approval_gate(state)
 
 
+def test_the_graph_drawing_shows_both_of_the_approval_gates_destinations():
+    """Chapter 11 types the gate `-> Command[Literal["refund", "escalate"]]`.
+    The gate has no static outgoing edge, so that annotation is the only
+    place the graph learns where it can go: `get_graph()` draws
+    approval_gate -> refund and approval_gate -> escalate, and no false
+    approval_gate -> __end__ edge (which is what a bare `-> Command` draws)."""
+    edges = {(e.source, e.target) for e in graph.get_graph().edges}
+
+    assert ("approval_gate", "refund") in edges
+    assert ("approval_gate", "escalate") in edges
+    assert ("approval_gate", "__end__") not in edges
+    assert ("triage", "approval_gate") in edges
+    assert ("triage", "refund") not in edges
+
+
 def test_the_refund_route_suspends_at_the_approval_gate_end_to_end(monkeypatch):
     """The durable-pause claim, exercised for real: no monkeypatched
     interrupt here - the compiled graph's own checkpointer is what makes the
