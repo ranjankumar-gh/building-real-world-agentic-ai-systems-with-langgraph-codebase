@@ -11,22 +11,22 @@ its own deliberately chosen reducer - `AtlasState` is imported from there now,
 not defined inline.
 
 Chapter 6, "Conditional Edges and Dynamic Control Flow", turns the linear
-START -> triage -> retrieve -> answer -> END chain into the Figure 3.1
-branching topology: `triage` validates the model's proposed route against
-`ALLOWED_ROUTES` (off-menu -> "escalate", the routing boundary from that
-chapter), `add_conditional_edges` replaces the fixed triage->retrieve and
-retrieve->answer edges, and a new `escalate` node gives the graph a graceful
-exit. `retrieve` is now a bounded retry cycle guarded by the explicit
-`retrieve_attempts` state counter - not by LangGraph's `recursion_limit` -
-which `triage` resets (with `error` and `retrieved`) at the start of every
-question, and
-records a `KnowledgeBaseUnavailable` failure in state instead of crashing
-or answering on top of it. `triage_with_command` is the chapter's `Command`
-alternative: update state and route in one move. It is intentionally not
-wired into `builder` below, the same way Chapter 4's `retrieve_async` is
-defined but unused - the chapter's own guidance is to default to conditional
-edges and reach for `Command` only when the update and the route are
-genuinely one decision.
+START -> triage -> retrieve -> answer -> END chain into the branching
+topology of Chapter 3's "The Atlas graph topology" figure: `triage`
+validates the model's proposed route against `ALLOWED_ROUTES` (off-menu ->
+"escalate", the routing boundary from that chapter), `add_conditional_edges`
+replaces the fixed triage->retrieve and retrieve->answer edges, and a new
+`escalate` node gives the graph a graceful exit. `retrieve` is now a bounded
+retry cycle guarded by the explicit `retrieve_attempts` state counter - not
+by LangGraph's `recursion_limit` - which `triage` resets (with `error` and
+`retrieved`) at the start of every question, and records a
+`KnowledgeBaseUnavailable` failure in state instead of crashing or answering
+on top of it. `triage_with_command` is the chapter's `Command` alternative:
+update state and route in one move. It is intentionally not wired into
+`builder` below, the same way Chapter 4's `retrieve_async` is defined but
+unused - the chapter's own guidance is to default to conditional edges and
+reach for `Command` only when the update and the route are genuinely one
+decision.
 
 The node bodies originally called stubs in atlas.helpers
 (classify/search_kb/compose_answer), which raised NotImplementedError.

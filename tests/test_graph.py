@@ -324,7 +324,7 @@ def test_recall_never_returns_a_different_customers_memory():
     assert delta == {"customer_plan": "unknown"}  # cust-b has no memory of its own
 
 
-def test_graph_compiles_with_the_figure_3_1_branching_topology():
+def test_graph_compiles_with_the_chapter_3_branching_topology():
     """Chapter 6 replaces the linear chain with triage/retrieve/answer/
     escalate joined by conditional edges. Chapter 10 adds `refund` - the
     checkpoint-membrane crossing - and its `error_handler` shows up as an
