@@ -234,7 +234,7 @@ def test_resume_approval_resumes_the_same_thread_and_completes_the_refund(
     thread_id = "test-thread-resume-approval"
 
     run_to_approval(thread_id, {"id": "T-1001", "amount": 49.0}, "refund please")
-    result = resume_approval(thread_id, {"type": "approve"})
+    result = resume_approval(thread_id, {"type": "approve", "by": "lead@support"})
 
     assert result["refund_done"] is True
     assert result["messages"][-1].content.startswith("Refund of $")

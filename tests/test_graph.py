@@ -710,7 +710,9 @@ def test_refund_charges_exactly_once_end_to_end_through_the_compiled_graph(
         },
         config,
     )
-    result = graph.invoke(Command(resume={"type": "approve"}), config)
+    result = graph.invoke(
+        Command(resume={"type": "approve", "by": "lead@support"}), config
+    )
 
     assert result["refund_done"] is True
     assert result["messages"][-1].content.startswith("Refund of $")
@@ -740,7 +742,9 @@ def test_a_refund_that_keeps_failing_exhausts_retries_then_escalates_end_to_end(
         },
         config,
     )
-    result = graph.invoke(Command(resume={"type": "approve"}), config)
+    result = graph.invoke(
+        Command(resume={"type": "approve", "by": "lead@support"}), config
+    )
 
     assert len(attempts) == 3  # max_attempts on the refund node's RetryPolicy
     assert result["ticket"] == {"status": "escalated"}
@@ -760,7 +764,8 @@ def test_approval_gate_surfaces_the_proposed_refund_and_approves_to_refund(
     monkeypatch.setattr(
         graph_module,
         "interrupt",
-        lambda payload: seen_payloads.append(payload) or {"type": "approve"},
+        lambda payload: seen_payloads.append(payload)
+        or {"type": "approve", "by": "lead@support"},
     )
     state = _state(ticket={"id": "T-1001", "amount": 49.0})
 
@@ -781,7 +786,11 @@ def test_approval_gate_rejects_and_routes_to_escalate_with_the_reason_recorded(
     monkeypatch.setattr(
         graph_module,
         "interrupt",
-        lambda payload: {"type": "reject", "reason": "duplicate refund request"},
+        lambda payload: {
+            "type": "reject",
+            "reason": "duplicate refund request",
+            "by": "lead@support",
+        },
     )
     state = _state(ticket={"id": "T-1001", "amount": 49.0})
 
@@ -799,7 +808,9 @@ def test_approval_gate_accepts_an_edit_within_policy_and_updates_the_ticket_amou
     here it passes (the edited amount is within the original amount) and the
     gate updates `ticket` before routing to refund."""
     monkeypatch.setattr(
-        graph_module, "interrupt", lambda payload: {"type": "edit", "amount": 24.0}
+        graph_module,
+        "interrupt",
+        lambda payload: {"type": "edit", "amount": 24.0, "by": "lead@support"},
     )
     state = _state(ticket={"id": "T-1001", "amount": 49.0})
 
@@ -817,7 +828,9 @@ def test_approval_gate_rejects_an_out_of_policy_edit_and_escalates_instead(
     caught the same way a hallucinated tool argument is - it never reaches
     refund."""
     monkeypatch.setattr(
-        graph_module, "interrupt", lambda payload: {"type": "edit", "amount": 4900.0}
+        graph_module,
+        "interrupt",
+        lambda payload: {"type": "edit", "amount": 4900.0, "by": "lead@support"},
     )
     state = _state(ticket={"id": "T-1001", "amount": 49.0})
 
@@ -894,7 +907,7 @@ def test_resuming_with_an_edit_re_validates_before_crossing_the_membrane(
         config,
     )
     result = graph.invoke(
-        Command(resume={"type": "edit", "amount": 4900.0}), config
+        Command(resume={"type": "edit", "amount": 4900.0, "by": "lead@support"}), config
     )
 
     assert result.get("refund_done") is not True
@@ -945,7 +958,9 @@ def test_a_resume_with_the_same_key_still_charges_once(monkeypatch):
     config = _suspend_refund(
         monkeypatch, "test-thread-edit-resume", {"id": "T-2401", "amount": 2400.0}
     )
-    graph.invoke(Command(resume={"type": "edit", "amount": 240.0}), config)
+    graph.invoke(
+        Command(resume={"type": "edit", "amount": 240.0, "by": "lead@support"}), config
+    )
     charged = dict(effects._LEDGER)
 
     # Re-run the refund node against the checkpointed state, same thread.
@@ -977,7 +992,9 @@ def test_an_amount_above_the_original_is_refused_and_escalates_end_to_end(
         monkeypatch, "test-thread-over-cap", {"id": "T-0049", "amount": 4900.0}
     )
 
-    result = graph.invoke(Command(resume={"type": "approve"}), config)
+    result = graph.invoke(
+        Command(resume={"type": "approve", "by": "lead@support"}), config
+    )
 
     assert attempts == [4900.0]  # deterministic refusal: not retried
     assert result.get("refund_done") is not True
@@ -1027,6 +1044,20 @@ def test_a_rejected_refund_records_the_decision_too(monkeypatch):
     assert result["approval"]["decision"] == "reject"
     assert result["approval"]["by"] == "lead@example.com"
 
+
+def test_a_resume_without_by_leaves_an_empty_decider_on_purpose(monkeypatch):
+    """The gate reads `by` with .get, so a caller that omits it still
+    routes - and leaves `by` as None, an audit record that names no one.
+    Ch11's Production considerations warn against exactly this; the test
+    pins the behavior so the warning stays true."""
+    config = _suspend_refund(
+        monkeypatch, "test-thread-no-by", {"id": "T-1001", "amount": 49.0}
+    )
+
+    result = graph.invoke(Command(resume={"type": "approve"}), config)
+
+    assert result["approval"]["decision"] == "approve"
+    assert result["approval"]["by"] is None
 
 def test_timeout_policy_is_accepted_on_an_async_node():
     """"Timeouts are async-only": TimeoutPolicy attaches cleanly to an async
