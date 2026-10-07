@@ -92,13 +92,20 @@ re-runs from the top (see the chapter's "gotcha" callout), `approval_gate`
 does nothing but interrupt and route - no side effect lives here, the same
 membrane discipline Chapter 10 established for `refund` itself.
 
-Chapter 12, "Context Engineering", makes the retrieved slice real on the
-answer path: `answer` passes `state["retrieved"]` through
-`atlas/context.py`'s `select_docs` with `BUDGET.retrieved` before composing
-the reply, so the best-scored documents that fit the slice reach the reply
-and the rest are dropped. (A `resolve_node` mounted at "answer" through
-`build_graph`, Chapter 17's pattern, replaces this function and with it the
-cap; the mounted agent's own `ContextBudget` bounds history only.)
+Chapter 12, "Context Engineering", puts the graph's model call and its
+documents on the budget. `triage` hands `classify` the view
+`atlas/context.py`'s `trim_history` cuts to `BUDGET.history`, so however
+long the thread grows, the classifier sees only the recent turns that fit
+the history slice; `state["messages"]` itself keeps every turn.
+(`triage_with_command` takes the same view.) `retrieve` passes the search
+results through `select_docs` with `BUDGET.retrieved` before it writes
+`retrieved`, so the best-scored documents that fit the slice are all that
+`route_after_retrieve` and `answer` ever see. An article larger than the
+whole slice leaves the list empty, which is Chapter 6's "nothing usable"
+path: retry, then escalate - never a reply that found nothing. Because the
+cap lives in `retrieve`, `retrieved` is capped whatever node is mounted at
+"answer" through `build_graph` (Chapter 17's pattern); that mounted agent
+reads only `messages`, and its own `ContextBudget` bounds its history.
 
 Chapter 13, "Short-Term vs Long-Term Memory", adds `recall` and `remember` -
 the node-facing side of the cross-thread store (`atlas/memory.py` holds the
@@ -159,13 +166,13 @@ from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Overwrite, RetryPolicy, TimeoutPolicy, interrupt
 
-from atlas.context import BUDGET, select_docs
+from atlas.context import BUDGET, select_docs, trim_history
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
 from atlas.memory import profile_ns, relevant_memories
 from atlas.research import research_graph
 from atlas.state import AtlasState
-from atlas.tools import KnowledgeBaseUnavailable
+from atlas.tools import KnowledgeBaseUnavailable, text_of
 from atlas.triage import classify
 
 ALLOWED_ROUTES = ("answer", "retrieve", "escalate", "refund")
@@ -188,8 +195,12 @@ def triage(state: AtlasState) -> dict:
     question's documents. `retrieved` has a reducer (dedup_by_id), which
     would merge an empty list into the old one, so its reset is an
     `Overwrite` - one per channel per superstep, and triage is the only
-    writer in its superstep."""
-    decision = classify(state["messages"])  # typed; route is already constrained
+    writer in its superstep.
+
+    Chapter 12: the classifier sees the history slice, not the whole thread.
+    `trim_history` returns a new list, so state keeps every turn."""
+    view = trim_history(state["messages"], BUDGET.history)  # Chapter 12: bounded
+    decision = classify(view)  # typed; route is already constrained
     route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
     # a new question starts clean: no attempts, no failure, no documents
     return {
@@ -207,7 +218,7 @@ def triage_with_command(
     state and name the next node in one move, for when the two are genuinely
     the same decision. Not wired into `builder` - `triage` above stays the
     default, since it keeps routing visible on a separate edge."""
-    decision = classify(state["messages"])
+    decision = classify(trim_history(state["messages"], BUDGET.history))
     route = decision.route if decision.route in ALLOWED_ROUTES else "escalate"
     update = {
         "route": route,
@@ -236,13 +247,18 @@ def retrieve(state: AtlasState) -> dict:
     Chapter 6 adds the bounded-retry counter and the failure path: a
     `KnowledgeBaseUnavailable` is caught and recorded in `error` rather than
     left to crash the run, and every successful call increments
-    `retrieve_attempts` so `route_after_retrieve` can cap the retry loop."""
+    `retrieve_attempts` so `route_after_retrieve` can cap the retry loop.
+
+    Chapter 12 caps the results to the retrieved slice here, before routing:
+    an article too large for the slice leaves nothing usable, and the bounded
+    retry and escalation handle it like any other empty search."""
     try:
         hits = search_kb(state["messages"])
     except KnowledgeBaseUnavailable as exc:
         return {"error": str(exc)}  # record the failure - do not pretend it worked
+    docs = select_docs(hits, BUDGET.retrieved)  # Chapter 12: cap before routing
     attempts = state.get("retrieve_attempts", 0) + 1
-    return {"retrieved": hits, "retrieve_attempts": attempts}
+    return {"retrieved": docs, "retrieve_attempts": attempts}
 
 
 async def retrieve_async(state: AtlasState) -> dict:
@@ -268,12 +284,11 @@ def route_after_retrieve(
 
 
 def answer(state: AtlasState) -> dict:
-    """Chapter 12: only the best-scored documents that fit the retrieved
-    slice reach the reply - fetching ten does not mean using ten. Chapter 13:
-    the profile `recall` loaded reaches the reply too."""
-    docs = select_docs(state["retrieved"], BUDGET.retrieved)
+    """`retrieve` already capped `retrieved` to the slice (Chapter 12), so
+    the reply uses what is there. Chapter 13: the profile `recall` loaded
+    reaches the reply too."""
     profile = state.get("customer_profile")          # Chapter 13: recall wrote it
-    reply = compose_answer(state["messages"], docs, profile=profile)
+    reply = compose_answer(state["messages"], state["retrieved"], profile=profile)
     # compose_answer returns a str, and add_messages coerces a bare str into a
     # HumanMessage - wrap it so the reply is recorded as the assistant's turn.
     return {"messages": [AIMessage(content=reply)]}
@@ -379,7 +394,7 @@ def recall(state: AtlasState, runtime: Runtime) -> dict:
     ticket = state.get("ticket") or {}
     if "customer_id" not in ticket:
         return {}                     # no customer on the ticket: nothing to load
-    question = state["messages"][-1].text           # the turn that just arrived
+    question = text_of(state["messages"][-1])       # the turn that just arrived
     found = relevant_memories(runtime.store, ticket["customer_id"], question)
     return {"customer_profile": {item.key: item.value["value"] for item in found}}
 
@@ -390,7 +405,8 @@ def remember(state: AtlasState, runtime: Runtime) -> dict:
     ticket = state.get("ticket") or {}
     if "customer_id" not in ticket:
         return {}
-    question = next(m.text for m in reversed(state["messages"]) if m.type == "human")
+    human = [m for m in state["messages"] if m.type == "human"]
+    question = text_of(human[-1])                    # the issue this ticket raised
     runtime.store.put(
         profile_ns(ticket["customer_id"]),
         "last_issue",

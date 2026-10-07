@@ -35,7 +35,10 @@ the store into a memory that learns. `CustomerFact`/`Extraction` and
 `extractor` are the structured-output extraction step (Chapter 7's
 `response_format` pattern, same shape as `atlas/triage.py`'s
 `triage_agent`) - candidate facts, never trusted until checked and
-reconciled. `reflect` drops any candidate whose `source_turn` does not
+reconciled. `reflect` hands the extractor numbered copies of the messages
+that also name who wrote each one (`[0] customer: ...`, `[1] Atlas: ...`),
+so the model cites a number it can see and knows whose words it is
+reading. It then drops any candidate whose `source_turn` does not
 point at a real customer turn of the conversation, then hands the rest to
 `compact`, which reconciles them by `fact.key`: an identical value is
 skipped, anything else overwrites, so the profile holds one current value
@@ -71,6 +74,8 @@ from langchain_core.messages import AnyMessage
 from langgraph.store.base import BaseStore, IndexConfig, Item
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field
+
+from atlas.tools import text_of
 
 if typing.TYPE_CHECKING:  # annotations only: langmem stays a lazy import
     from langmem.knowledge.extraction import MemoryStoreManager
@@ -166,7 +171,8 @@ extractor = create_agent(
     system_prompt=(
         "Extract only facts the customer explicitly stated. Do not infer or "
         "guess. If nothing durable was said, return no facts. Each message "
-        "starts with its number in brackets; set source_turn to that number."
+        "starts with its number in brackets, then who wrote it; set "
+        "source_turn to that number."
     ),
 )
 
@@ -184,11 +190,16 @@ def compact(
         store.put(ns, fact.key, fact.model_dump())     # insert or overwrite
 
 
+def _speaker(message: AnyMessage) -> str:
+    """Who wrote a message, as the extractor reads it."""
+    return "customer" if message.type == "human" else "Atlas"
+
+
 def reflect(store: BaseStore, customer_id: str, messages: list[AnyMessage]) -> None:
     """The full reflection pass - extract, check, compact. Runs AFTER the
     response, scheduled off the hot path."""
-    numbered = [  # the model cites the [n] it sees, not a position it counts
-        m.model_copy(update={"content": f"[{i}] {m.text}"})
+    numbered = [  # "[0] customer: ...": the model cites the [n] it sees
+        m.model_copy(update={"content": f"[{i}] {_speaker(m)}: {text_of(m)}"})
         for i, m in enumerate(messages)
     ]
     result = extractor.invoke({"messages": numbered})

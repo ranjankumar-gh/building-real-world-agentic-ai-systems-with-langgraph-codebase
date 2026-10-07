@@ -375,7 +375,8 @@ def test_reflect_numbers_the_messages_and_the_check_uses_those_numbers(
 ):
     """G4: the extractor sees each message prefixed with its [n] number, so
     source_turn names a visible index rather than a position the model has
-    to count. This stand-in extractor cites whatever number it sees in front
+    to count. R76: each line also names who wrote it ("customer" or
+    "Atlas"), matching the chapter's extraction figure. This stand-in extractor cites whatever number it sees in front
     of each line: the customer's preference survives, and the fact lifted
     from Atlas's reply is dropped."""
     seen = {}
@@ -407,9 +408,9 @@ def test_reflect_numbers_the_messages_and_the_check_uses_those_numbers(
     reflect(store, "cust-1", messages)
 
     assert seen["contents"] == [
-        "[0] Hi, quick question.",
-        "[1] Sure. You're on the legacy plan.",
-        "[2] Please email me rather than calling.",
+        "[0] customer: Hi, quick question.",
+        "[1] Atlas: Sure. You're on the legacy plan.",
+        "[2] customer: Please email me rather than calling.",
     ]
     assert messages[0].content == "Hi, quick question."  # originals untouched
     kept = {item.key for item in store.search(profile_ns("cust-1"))}

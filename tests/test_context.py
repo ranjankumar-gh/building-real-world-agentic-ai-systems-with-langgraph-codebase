@@ -11,7 +11,7 @@ from langchain.agents.middleware import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from atlas.context import Budget, ContextBudget, select_docs
+from atlas.context import Budget, ContextBudget, select_docs, trim_history
 
 
 def _request(messages: list) -> ModelRequest:
@@ -37,6 +37,21 @@ def test_budget_holds_the_two_named_slices():
 
     assert budget.history == 4000
     assert budget.retrieved == 2000
+
+
+def test_trim_history_returns_a_new_list_under_the_slice_and_leaves_the_input():
+    """The shared trim (Chapter 12): ContextBudget and the graph's triage
+    node both call it. It returns a new list that fits the slice and starts
+    on a human turn; the list it was given keeps every message."""
+    history = _long_conversation(turns=20)
+    before = list(history)
+
+    trimmed = trim_history(history, max_tokens=50)
+
+    assert count_tokens_approximately(trimmed) <= 50
+    assert trimmed and trimmed[0].type == "human"
+    assert trimmed[-1] is history[-1]
+    assert history == before
 
 
 def test_context_budget_trims_the_view_not_the_request_object_in_place():

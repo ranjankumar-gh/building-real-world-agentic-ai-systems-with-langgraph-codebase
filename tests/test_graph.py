@@ -44,8 +44,11 @@ REAL `interrupt()`/`Command(resume=...)` cycle through the compiled graph,
 proving the suspension is real (the run returns with `result["__interrupt__"]`
 set) and that resuming lands exactly where the chapter promises.
 
-Chapter 12, "Context Engineering": `answer` caps `state["retrieved"]` to
-`BUDGET.retrieved` with `select_docs` before composing the reply.
+Chapter 12, "Context Engineering": `triage` hands `classify` the history
+slice (`trim_history` to `BUDGET.history`) while state keeps every turn, and
+`retrieve` caps the search results to `BUDGET.retrieved` with `select_docs`
+before routing, so an article larger than the slice retries and escalates
+instead of reaching `answer`.
 
 Chapter 13, "Short-Term vs Long-Term Memory": `recall` runs before `triage`
 and `remember` after `answer`. The node tests below call them directly
@@ -234,11 +237,12 @@ def test_escalate_returns_a_delta_only_and_does_not_touch_the_input_state():
 
 
 def test_retrieve_calls_search_kb_and_wraps_its_result_in_a_delta(monkeypatch):
-    monkeypatch.setattr(graph_module, "search_kb", lambda messages: ["hit-1"])
+    hit = {"id": "kb:1", "text": "Refunds take 5 days.", "score": 1.0}
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [hit])
 
     delta = retrieve(_state(messages=["hi"]))
 
-    assert delta == {"retrieved": ["hit-1"], "retrieve_attempts": 1}
+    assert delta == {"retrieved": [hit], "retrieve_attempts": 1}
 
 
 def test_retrieve_increments_the_attempt_counter_on_every_call(monkeypatch):
@@ -275,11 +279,28 @@ def test_answer_calls_compose_answer_and_wraps_its_result_in_a_delta(monkeypatch
     assert message.content == "reply"
 
 
-def test_answer_enforces_the_retrieved_slice_with_select_docs(monkeypatch):
-    """Chapter 12: the retrieved slice is enforced, not only declared.
-    Three documents of about 1,500 tokens each against BUDGET.retrieved
-    (2,000): only the highest-scored one fits, so it is the only one
-    compose_answer ever sees - whatever order `retrieved` holds them in."""
+def test_retrieve_enforces_the_retrieved_slice_with_select_docs(monkeypatch):
+    """Chapter 12: the retrieved slice is enforced in `retrieve`, before
+    routing. Three documents of about 1,500 tokens each against
+    BUDGET.retrieved (2,000): only the highest-scored one fits, so it is the
+    only one written to `retrieved` - whatever order the search returned."""
+    big = "x" * 6000  # about 1,500 tokens at four characters per token
+    docs = [
+        {"id": "low", "text": big, "score": 0.2},
+        {"id": "best", "text": big, "score": 0.9},
+        {"id": "mid", "text": big, "score": 0.5},
+    ]
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: docs)
+    assert BUDGET.retrieved == 2000
+
+    delta = retrieve(_state(messages=["hi"]))
+
+    assert [d["id"] for d in delta["retrieved"]] == ["best"]
+
+
+def test_answer_composes_from_retrieved_as_retrieve_left_it(monkeypatch):
+    """`answer` no longer re-caps: `retrieve` already did, so the documents
+    in state are the ones the reply uses."""
     seen = {}
 
     def fake_compose(messages, retrieved, profile=None):
@@ -287,17 +308,82 @@ def test_answer_enforces_the_retrieved_slice_with_select_docs(monkeypatch):
         return "reply"
 
     monkeypatch.setattr(graph_module, "compose_answer", fake_compose)
-    big = "x" * 6000  # about 1,500 tokens at four characters per token
-    docs = [
-        {"id": "low", "text": big, "score": 0.2},
-        {"id": "best", "text": big, "score": 0.9},
-        {"id": "mid", "text": big, "score": 0.5},
-    ]
-    assert BUDGET.retrieved == 2000
+    hit = {"id": "kb:1", "text": "Refunds take 5 days.", "score": 1.0}
 
-    answer(_state(messages=["hi"], retrieved=docs))
+    answer(_state(messages=["hi"], retrieved=[hit]))
 
-    assert [d["id"] for d in seen["docs"]] == ["best"]
+    assert seen["docs"] == [hit]
+
+
+def test_an_article_larger_than_the_slice_retries_then_escalates(monkeypatch):
+    """Chapter 12, C2: a single article bigger than the whole retrieved slice
+    is dropped by `select_docs` in `retrieve`, so the list
+    `route_after_retrieve` reads is empty. That is Chapter 6's "nothing
+    usable" path: retry up to the cap, then escalate. The run never reaches
+    `answer`, so the customer never gets a reply that found nothing."""
+    huge = {"id": "kb:huge", "text": "x" * 12000, "score": 1.0}  # ~3,000 tokens
+    calls: list[str] = []
+
+    def _huge_kb(messages):
+        calls.append("search")
+        return [huge]
+
+    def _no_answer(*args, **kwargs):
+        raise AssertionError("answer must not compose a reply")
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    monkeypatch.setattr(graph_module, "search_kb", _huge_kb)
+    monkeypatch.setattr(graph_module, "compose_answer", _no_answer)
+    config = {"configurable": {"thread_id": "test-thread-oversized-article"}}
+
+    result = graph.invoke({"messages": [{"role": "user", "content": "hi"}]}, config)
+
+    assert len(calls) == MAX_RETRIEVE_ATTEMPTS  # the first try plus two retries
+    assert result["retrieved"] == []
+    assert result["ticket"] == {"status": "escalated"}
+    assert not any(isinstance(m, AIMessage) for m in result["messages"])
+
+
+def test_triage_hands_classify_the_history_slice_and_state_keeps_every_turn(
+    monkeypatch,
+):
+    """Chapter 12, C1: the graph's own model call is bounded. A thread far
+    longer than BUDGET.history reaches `classify` trimmed to the slice,
+    starting on a human turn, and ending on the newest question; the stored
+    history is untouched."""
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    seen = {}
+
+    def fake_classify(messages):
+        seen["messages"] = messages
+        return _decision("answer")
+
+    monkeypatch.setattr(graph_module, "classify", fake_classify)
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
+    )
+    history = []
+    for i in range(60):  # about 6,600 tokens, well past the 4,000 slice
+        history.append(HumanMessage(f"question {i} " + "about my order " * 25))
+        history.append(AIMessage(f"answer {i} " + "about your order " * 25))
+    config = {"configurable": {"thread_id": "test-thread-triage-budget"}}
+    graph.update_state(config, {"messages": history}, as_node="remember")
+
+    result = graph.invoke(
+        {"messages": [{"role": "user", "content": "so will I be charged?"}]}, config
+    )
+
+    seen_messages = seen["messages"]
+    assert count_tokens_approximately(history) > BUDGET.history
+    assert count_tokens_approximately(seen_messages) <= BUDGET.history
+    assert len(seen_messages) < len(history)
+    assert seen_messages[0].type == "human"
+    assert seen_messages[-1].content == "so will I be charged?"
+    # state keeps it all: 120 stored turns + the question + the reply
+    assert len(result["messages"]) == len(history) + 2
 
 
 def test_retrieve_async_offloads_the_blocking_call_via_asyncio_to_thread(monkeypatch):
