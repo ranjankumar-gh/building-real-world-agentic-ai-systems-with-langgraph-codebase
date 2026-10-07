@@ -76,7 +76,7 @@ if typing.TYPE_CHECKING:  # annotations only: langmem stays a lazy import
     from langmem.knowledge.extraction import MemoryStoreManager
     from langmem.reflection import LocalReflectionExecutor
 
-DB_URI = "postgresql://atlas:atlas@localhost:5432/atlas"
+DB_URI = "postgresql://atlas:atlas@localhost:5432/atlas"  # same DSN as Chapter 9
 
 
 SAFE_ID = re.compile(r"[A-Za-z0-9-]+")  # no ".", "%", or "_" in a label
