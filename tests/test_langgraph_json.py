@@ -34,23 +34,49 @@ def test_langgraph_json_is_valid_json_with_the_expected_top_level_keys():
     assert config["python_version"] == "3.12"
 
 
-def test_langgraph_json_maps_both_of_atlass_graphs():
+def test_langgraph_json_serves_the_resolved_graph_research_and_the_monitor():
+    """`resolve` is the production assembly (the mounted agent and its gates),
+    not atlas/graph.py's model-free `graph`; `monitor` is the graph Chapter
+    22's cron targets."""
     config = _load_config()
     assert config["graphs"] == {
-        "resolve": "./atlas/graph.py:graph",
+        "resolve": "./atlas/deploy/server.py:resolve",
         "research": "./atlas/research.py:research_graph",
+        "monitor": "./atlas/deploy/server.py:monitor",
     }
+
+
+def test_no_served_graph_brings_its_own_checkpointer_or_store():
+    """`langgraph dev` refuses a graph compiled with either ("Heads up! Your
+    graph ... includes a custom checkpointer"), and under `langgraph up` the
+    server's Postgres replaces them anyway."""
+    for name, graph_obj in _served_graphs():
+        assert graph_obj.checkpointer is None, name
+        assert graph_obj.store is None, name
+
+
+def _served_graphs() -> list[tuple[str, object]]:
+    found = []
+    for name, target in _load_config()["graphs"].items():
+        path, attr = target.split(":")
+        # "./atlas/deploy/server.py" -> "atlas.deploy.server"
+        module_name = ".".join(Path(path).with_suffix("").parts)
+        module = importlib.import_module(module_name)
+        found.append((name, getattr(module, attr, None)))
+    return found
 
 
 def test_every_graphs_entry_resolves_to_a_real_compiled_graph():
     """Each value is '<path>:<attr>' - confirm the module imports and the
     named attribute exists and is actually a compiled (invoke-able) graph,
     not a stale or renamed reference."""
-    config = _load_config()
-    for name, target in config["graphs"].items():
-        path, attr = target.split(":")
-        module_name = "atlas." + Path(path).stem  # "./atlas/graph.py" -> "atlas.graph"
-        module = importlib.import_module(module_name)
-        graph_obj = getattr(module, attr, None)
-        assert graph_obj is not None, f"{name}: {target} has no such attribute"
-        assert hasattr(graph_obj, "invoke"), f"{name}: {target} is not a compiled graph"
+    for name, graph_obj in _served_graphs():
+        assert graph_obj is not None, f"{name}: no such attribute"
+        assert hasattr(graph_obj, "invoke"), f"{name}: not a compiled graph"
+
+
+def test_the_served_resolve_graph_mounts_the_agent_not_the_stub():
+    from atlas.graph import answer
+
+    resolve = dict(_served_graphs())["resolve"]
+    assert resolve.builder.nodes["answer"].runnable.func is not answer

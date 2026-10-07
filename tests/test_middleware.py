@@ -393,7 +393,7 @@ def test_authority_gate_passes_through_other_tools_unconditionally():
 
 def test_redact_email_masks_every_address_in_the_text():
     assert redact_email("reach jane@example.com or john@example.com") == (
-        "reach [EMAIL] or [EMAIL]"
+        "reach [REDACTED_EMAIL] or [REDACTED_EMAIL]"
     )
 
 

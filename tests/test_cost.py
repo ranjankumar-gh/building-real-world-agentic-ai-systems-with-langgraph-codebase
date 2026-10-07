@@ -1,11 +1,13 @@
 """Chapter 23, "Security, Privacy, Cost, and Governance" - atlas/cost.py.
 
-See "A hard, cumulative cost ceiling". `TenantBudgetGuard.wrap_model_call`
+See "A cumulative cost ceiling". `TenantBudgetGuard.wrap_model_call`
 needs no live model call to test - it only reads/writes the cumulative
 token count in a `BaseStore` and decides whether to call `handler` at all,
 so an `InMemoryStore` (the same dev/test default `atlas/memory.py` already
 uses) plus a dummy `ModelRequest` (the `test_context.py` convention) is
 enough to exercise it directly."""
+
+import asyncio
 
 from datetime import datetime, timezone
 
@@ -183,3 +185,52 @@ def test_the_breach_records_the_cap_as_the_reason():
 
     item = store.get(("containment", "customer-42"), "revocation")
     assert "cap" in item.value["reason"]
+
+
+# --- The async twin and the graph's store ----------------------------------
+
+
+def _request_on(store: InMemoryStore, customer_id: str, messages: list) -> ModelRequest:
+    request = _request(customer_id, messages)
+    return request.override(
+        runtime=Runtime(context=request.runtime.context, store=store)
+    )
+
+
+def test_the_async_twin_charges_the_graphs_store_the_same_amount():
+    sync_store, async_store = InMemoryStore(), InMemoryStore()
+    messages = [HumanMessage("what is the refund window")]
+
+    async def handler(_request):
+        return "handled"
+
+    TenantBudgetGuard().wrap_model_call(
+        _request_on(sync_store, "C-1", messages), lambda r: "handled"
+    )
+    result = asyncio.run(
+        TenantBudgetGuard().awrap_model_call(
+            _request_on(async_store, "C-1", messages), handler
+        )
+    )
+
+    ns = budget_ns("C-1", current_period())
+    assert result == "handled"
+    assert async_store.get(ns, "spent").value == sync_store.get(ns, "spent").value
+
+
+def test_the_async_twin_degrades_and_revokes_over_the_cap():
+    store = InMemoryStore()
+    ns = budget_ns("C-1", current_period())
+    store.put(ns, "spent", {"tokens": MONTHLY_TOKEN_CAP})
+
+    async def handler(_request):
+        raise AssertionError("the model must not be called over the cap")
+
+    result = asyncio.run(
+        TenantBudgetGuard(revoke_on_breach=True).awrap_model_call(
+            _request_on(store, "C-1", [HumanMessage("hi")]), handler
+        )
+    )
+
+    assert isinstance(result, ModelResponse)
+    assert is_revoked(store, "C-1") is True

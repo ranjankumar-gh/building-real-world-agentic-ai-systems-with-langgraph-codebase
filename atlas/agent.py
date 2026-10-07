@@ -50,7 +50,8 @@ trims the per-call view of it, satisfying "Budget and summarization must
 compose in the right order" structurally, not by list ordering.
 
 Chapter 23, "Security, Privacy, Cost, and Governance", folds in the five
-middleware from `atlas/containment.py`, `atlas/security.py`, `atlas/cost.py`,
+middleware (each with its async twin, sharing one helper, the Chapter 8
+rule) from `atlas/containment.py`, `atlas/security.py`, `atlas/cost.py`,
 and `atlas/audit.py`: `RevocationGate`, `RoleAuthorityGate`, `InjectionGuard`,
 `TenantBudgetGuard`, and `AuditGate`.
 Before this chapter's increment they existed but were never attached to
@@ -107,15 +108,14 @@ model = init_chat_model("claude-sonnet-4-6", temperature=0, max_tokens=1024)
 # shared with atlas/graph.py's `answer`, which caps retrieved docs to it.
 context_budget = ContextBudget(BUDGET)
 
-# Chapter 13 / Chapter 23 dev default - the same swap-for-prod pattern
-# atlas/memory.py already establishes, reused here rather than duplicated:
-# `build_dev_store()` for the dev/test path this suite runs against, and
-# `build_prod_store(db_uri)` in production, so the cumulative cost cap and
-# the audit log actually survive a restart instead of losing every count
-# and every record the moment the process does. One instance, shared, so
-# a budget check and an audit entry for the same call land in the same
-# store. See "A hard, cumulative cost ceiling" and "A durable audit log,
-# deliberately separate from the trace".
+# Chapter 13 / Chapter 23: each gate writes to the store the graph it runs in
+# was compiled with (`request.runtime.store`, via atlas/security.py's
+# `graph_store`): Chapter 13's store, `PostgresStore` in production, so the
+# cost counter, the revocations, and the audit log survive a restart and an
+# operator reading them sees the same rows. Mounted (atlas/resolve.py) or
+# served (atlas/deploy/server.py), the agent inherits that store. `store`
+# below, the dev store from atlas/memory.py, is only the fallback for an
+# agent invoked on its own, with no graph store around it.
 store = build_dev_store()
 
 RESOLVE_MIDDLEWARE = [
@@ -137,8 +137,8 @@ resolve_agent = create_agent(
     system_prompt=RESOLVE_PROMPT,
     context_schema=AtlasContext,  # <2>
     middleware=RESOLVE_MIDDLEWARE,
-    name="resolve-agent",  # Chapter 20: turns a generic AgentExecutor span
-    # into "resolve-agent" in the trace tree - see "Naming the fleet".
+    name="resolve-agent",  # Chapter 20: an unnamed agent's span reads
+    # "LangGraph"; this names it "resolve-agent" - see "Naming the fleet".
 )
 
 # 1. Order is the whole point: the first entry is the outermost wrapper, so
@@ -232,7 +232,11 @@ async def build_resolve_agent() -> CompiledStateGraph:
     server that connects but lists none of the tools you need returns an
     empty or short list without complaint, so the guard below refuses to
     start on an empty list rather than run with a silently shrunken
-    authority surface. See "Production considerations"."""
+    authority surface. See "Production considerations".
+
+    Chapter 23 gives it the same `RESOLVE_MIDDLEWARE` and `context_schema`
+    as `resolve_agent`: an MCP result is untrusted content too, so it passes
+    `InjectionGuard` like any other tool result."""
     client = MultiServerMCPClient(
         {
             "atlas-status": {
@@ -249,6 +253,8 @@ async def build_resolve_agent() -> CompiledStateGraph:
         model="claude-sonnet-4-6",
         tools=RESOLVE_TOOLS + mcp_tools,  # <2>
         system_prompt=RESOLVE_PROMPT,
+        context_schema=AtlasContext,  # Chapter 23: the same gates as
+        middleware=RESOLVE_MIDDLEWARE,  # resolve_agent, InjectionGuard included
     )
 
 
@@ -266,15 +272,16 @@ def run_resolve(inputs: dict, config: dict) -> dict:
     topology". `name="resolve-agent"` above turns the span itself into a
     labeled one; the `trace()` context here adds tags and metadata ONCE, at
     this single entry point, rather than scattering `tags=` across call
-    sites where they could drift out of sync. `route`, `thread_id`, and
-    `customer_id` are expected on `config["configurable"]` by the caller -
-    reusing Chapter 6's routing decision and Chapter 9/13's existing
-    identifiers rather than inventing new ones. Building/entering `trace()`
-    needs no live LangSmith connection - it is a local context manager that
-    only submits data once `LANGSMITH_TRACING` is actually "true"."""
+    sites where they could drift out of sync. `thread_id` and `customer_id`
+    are expected on `config["configurable"]` by the caller - Chapter 9/13's
+    existing identifiers. There is no route tag: the route is triage's
+    output, decided inside the turn, not known here at invoke time (the
+    `triage` span carries it). Building/entering `trace()` needs no live
+    LangSmith connection - it is a local context manager that only submits
+    data once `LANGSMITH_TRACING` is actually "true"."""
     with trace(
         name="atlas-turn",
-        tags=["atlas", config["configurable"]["route"]],
+        tags=["atlas", "support"],
         metadata={
             "thread_id": config["configurable"]["thread_id"],
             "customer_id": config["configurable"]["customer_id"],

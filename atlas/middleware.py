@@ -44,8 +44,9 @@ shared definition of what counts as an email: its `.pattern` string form is
 string, verified against the installed `langchain==1.3.0` build; a callable
 returning a *redacted string* - the earlier draft's mistake - raises
 `AttributeError: 'str' object has no attribute 'get'` the moment content is
-scanned), and `redact_email` (built from the same compiled pattern) is what
-`atlas/tracing.py`'s `Client(hide_outputs=...)` uses for the trace side.
+scanned). `atlas/tracing.py`'s trace anonymizer uses the same compiled
+pattern, and `redact_email` applies it to a plain string; all three write
+`[REDACTED_EMAIL]`, `PIIMiddleware`'s own token, so every sink agrees.
 """
 
 import logging
@@ -76,8 +77,8 @@ log = logging.getLogger("atlas")
 # (both resolve to the name "PIIMiddleware[email]"). See the module docstring.
 
 # Chapter 20: the ONE shared definition of "what is an email" - PIIMiddleware
-# below uses its .pattern string as a detector; atlas/tracing.py's
-# redact_trace_outputs uses the compiled pattern directly via redact_email.
+# below uses its .pattern string as a detector; atlas/tracing.py's trace
+# anonymizer uses the compiled pattern directly, as redact_email does.
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 
 pii = PIIMiddleware(
@@ -91,10 +92,11 @@ pii = PIIMiddleware(
 
 def redact_email(text: str) -> str:
     """Atlas's own string-level redaction, built from the same EMAIL_PATTERN
-    passed to `pii` above - so the wire and the trace (atlas/tracing.py's
-    `redact_trace_outputs`) can never disagree about what "redacted" means.
+    passed to `pii` above and the same token it writes - so the wire and the
+    trace (atlas/tracing.py's anonymizer) never disagree about what
+    "redacted" means.
     """
-    return EMAIL_PATTERN.sub("[EMAIL]", text)
+    return EMAIL_PATTERN.sub("[REDACTED_EMAIL]", text)
 
 
 # 1. A regex pattern string, not a callable - PIIMiddleware's `detector=`

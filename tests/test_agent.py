@@ -24,9 +24,13 @@ import asyncio
 import functools
 
 import pytest
+from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 from langgraph.runtime import Runtime
+from langgraph.store.memory import InMemoryStore
 
 from atlas import agent as agent_module
 from atlas.agent import (
@@ -39,6 +43,7 @@ from atlas.agent import (
     resolve_agent,
     run_resolve,
 )
+from atlas.containment import revoke
 from atlas.context import ContextBudget
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
 from atlas.security import AtlasContext
@@ -142,7 +147,7 @@ def test_build_resolve_agent_refuses_to_start_when_mcp_returns_no_tools(monkeypa
 
 
 def test_resolve_agent_is_named_for_the_trace_tree():
-    """`name=` turns a generic AgentExecutor span into "resolve-agent" -
+    """`name=` turns the default "LangGraph" span into "resolve-agent" -
     the cheapest fix in the chapter."""
     assert resolve_agent.name == "resolve-agent"
 
@@ -167,7 +172,6 @@ def test_run_resolve_wraps_the_invoke_in_a_trace_context_and_returns_its_result(
     inputs = {"messages": [{"role": "user", "content": "hello"}]}
     config = {
         "configurable": {
-            "route": "resolve",
             "thread_id": "t-1",
             "customer_id": "cust-1",
         }
@@ -180,7 +184,7 @@ def test_run_resolve_wraps_the_invoke_in_a_trace_context_and_returns_its_result(
     assert captured["config"] == config
 
 
-def test_run_resolve_requires_route_thread_id_and_customer_id_in_configurable(
+def test_run_resolve_requires_thread_id_and_customer_id_in_configurable(
     monkeypatch,
 ):
     """A caller that forgets to set one of these gets a loud KeyError, not a
@@ -303,7 +307,8 @@ def test_a_role_refusal_reaches_injection_guard_untagged():
         tool=None,
         state=None,
         runtime=Runtime(
-            context=AtlasContext(role="support_readonly", customer_id="C-1")
+            context=AtlasContext(role="support_readonly", customer_id="C-1"),
+            store=InMemoryStore(),  # the graph's store, where AuditGate writes
         ),
     )
 
@@ -312,3 +317,113 @@ def test_a_role_refusal_reaches_injection_guard_untagged():
     assert result.status == "error"
     assert "not authorized" in result.content
     assert "<untrusted-content" not in result.content
+
+
+# --- Chapter 23: every gate has its async twin ------------------------------
+
+
+class _ToolCallingFake(GenericFakeChatModel):
+    """A scripted model create_agent can bind tools to (no API key)."""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+def _scripted(*calls: dict) -> _ToolCallingFake:
+    replies = [AIMessage("", tool_calls=[call]) for call in calls]
+    return _ToolCallingFake(messages=iter([*replies, AIMessage("done")]))
+
+
+def _stack_agent(model: _ToolCallingFake, store: InMemoryStore):
+    return create_agent(
+        model=model,
+        tools=RESOLVE_TOOLS,
+        system_prompt=RESOLVE_PROMPT,
+        context_schema=AtlasContext,
+        middleware=RESOLVE_MIDDLEWARE,
+        store=store,
+    )
+
+
+_SEARCH = {"name": "search_kb", "args": {"query": "refund window"}, "id": "call-s"}
+
+
+def test_the_whole_stack_runs_under_ainvoke_and_every_gate_acts():
+    """Before the twins, the first model call under ainvoke raised
+    NotImplementedError (create_agent puts a sync-only wrap hook in the async
+    chain). Now: the budget is charged, the call is audited, and the result
+    comes back scanned and tagged."""
+    store = InMemoryStore()
+    agent = _stack_agent(_scripted(_SEARCH), store)
+
+    out = asyncio.run(
+        agent.ainvoke(
+            {"messages": [("user", "how long is the refund window?")]},
+            context=AtlasContext(role="support_agent", customer_id="C-1"),
+        )
+    )
+
+    tool_result = next(m for m in out["messages"] if m.type == "tool")
+    assert tool_result.content.startswith('<untrusted-content source="search_kb">')
+    assert store.get(("audit", "C-1"), "call-s").value["result_status"] == "success"
+    spent = store.search(("customer", "C-1", "budget"))
+    assert spent and spent[0].value["tokens"] > 0
+
+
+def test_under_ainvoke_the_role_gate_refuses_and_the_refusal_is_audited():
+    store = InMemoryStore()
+    agent = _stack_agent(_scripted(_SEARCH), store)
+
+    out = asyncio.run(
+        agent.ainvoke(
+            {"messages": [("user", "how long is the refund window?")]},
+            context=AtlasContext(role="anonymous", customer_id="C-1"),
+        )
+    )
+
+    tool_result = next(m for m in out["messages"] if m.type == "tool")
+    assert tool_result.status == "error"
+    assert "not authorized" in tool_result.content
+    assert store.get(("audit", "C-1"), "call-s").value["result_status"] == "error"
+
+
+def test_under_ainvoke_a_revoked_subject_is_stopped_before_any_tool_runs():
+    store = InMemoryStore()
+    revoke(store, "C-1", reason="operator halt")
+    agent = _stack_agent(_scripted(_SEARCH), store)
+
+    with pytest.raises(RuntimeError, match="authority revoked"):
+        asyncio.run(
+            agent.ainvoke(
+                {"messages": [("user", "hello")]},
+                context=AtlasContext(role="support_agent", customer_id="C-1"),
+            )
+        )
+    assert store.search(("audit", "C-1")) == []
+
+
+def test_the_mcp_builder_carries_the_same_gates(monkeypatch):
+    """An MCP result is untrusted content too, so the MCP-connected agent
+    gets RESOLVE_MIDDLEWARE (InjectionGuard included) and AtlasContext."""
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self):
+            return [_fake_mcp_tool]
+
+    seen: dict = {}
+    real_create_agent = agent_module.create_agent
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return real_create_agent(**kwargs)
+
+    monkeypatch.setattr(agent_module, "MultiServerMCPClient", _FakeClient)
+    monkeypatch.setattr(agent_module, "create_agent", _spy)
+
+    asyncio.run(build_resolve_agent())
+
+    assert seen["middleware"] is RESOLVE_MIDDLEWARE
+    assert seen["context_schema"] is AtlasContext

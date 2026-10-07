@@ -1,8 +1,9 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "resolve": "./atlas/graph.py:graph",
-    "research": "./atlas/research.py:research_graph"
+    "resolve": "./atlas/deploy/server.py:resolve",
+    "research": "./atlas/research.py:research_graph",
+    "monitor": "./atlas/deploy/server.py:monitor"
   },
   "env": ".env",
   "python_version": "3.12"

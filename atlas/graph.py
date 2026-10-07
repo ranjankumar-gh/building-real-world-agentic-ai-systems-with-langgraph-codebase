@@ -155,7 +155,21 @@ parameter its use: `atlas/replay.py`'s checkpoint-replay fixture substitutes
 Chapter 1's `ScriptedModel` for the triage step's decision source without
 touching `builder`/`graph` (still built exactly as before, via
 `_make_builder(triage)`), which `tests/test_graph.py` and every other
-chapter's tests continue to depend on unchanged."""
+chapter's tests continue to depend on unchanged.
+
+Chapter 22, "Deployment and Scaling": the Agent Server supplies the
+checkpointer and the store, and `langgraph dev` refuses a graph compiled with
+its own, so `atlas/deploy/server.py` (the module `langgraph.json` serves)
+compiles `_make_builder`'s wiring with neither. Every other caller,
+`atlas/resolve.py`'s in-process `build_resolved_graph` included, keeps
+`InMemorySaver`/`InMemoryStore`.
+
+Chapter 23, "A durable audit log, deliberately separate from the trace",
+mounts `audited_approval_gate` in the "approval_gate" position: Chapter 11's
+`approval_gate`, unchanged, plus one store write after it returns - the
+approval record copied into the audit namespace (`atlas/audit.py`'s
+`record_approval`), where an erasure keeps it, rather than only into state,
+which an erasure deletes."""
 
 import asyncio
 from collections.abc import Callable
@@ -171,6 +185,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Overwrite, RetryPolicy, TimeoutPolicy, interrupt
 
+from atlas.audit import record_approval
 from atlas.context import BUDGET, select_docs, trim_history
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
@@ -370,6 +385,26 @@ def approval_gate(state: AtlasState) -> Command[Literal["refund", "escalate"]]:
     raise ValueError(f"unknown decision: {decision['type']}")
 
 
+def audited_approval_gate(
+    state: AtlasState, config: RunnableConfig, runtime: Runtime
+) -> Command[Literal["refund", "escalate"]]:
+    """Chapter 23: Chapter 11's gate, plus its decision in the audit log."""
+    command = approval_gate(state)  # raises GraphInterrupt until a human decides
+    if runtime.store is not None:  # <1>
+        thread_id = config["configurable"]["thread_id"]
+        record_approval(
+            runtime.store, state["ticket"], thread_id, command.update["approval"]
+        )
+    return command
+
+
+# 1. Reached only once `interrupt()` has returned a decision, so the write
+#    happens on the resumed run, after the human acted, never before. The key
+#    is the thread plus the ticket, so a replayed decision overwrites its own
+#    record instead of adding a second one. A graph compiled with no store has
+#    nowhere durable to put it; under the Agent Server there always is one.
+
+
 def refund(state: AtlasState, config: RunnableConfig) -> dict:
     """Atlas's first crossing of the checkpoint membrane. The idempotency
     key is derived from durable state (`thread_id` + `ticket_id`), so a
@@ -497,7 +532,7 @@ def _make_builder(
     # Chapter 11: the approval gate - no retry_policy, no side effect. It
     # only interrupts and routes; retrying a suspended interrupt is not the
     # same kind of retry Chapter 10 earned for refund.
-    b.add_node("approval_gate", approval_gate)
+    b.add_node("approval_gate", audited_approval_gate)
     b.add_node(
         "refund",
         refund,
@@ -559,7 +594,7 @@ def build_graph(
     else:
 
         def triage_node(state: AtlasState) -> dict:
-            ai = model.invoke(state["messages"])
+            ai = model.invoke(trim_history(state["messages"], BUDGET.history))
             route = ai.content if ai.content in ALLOWED_ROUTES else "escalate"
             return {
                 "route": route,

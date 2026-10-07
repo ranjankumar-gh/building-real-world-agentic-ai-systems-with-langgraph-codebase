@@ -15,13 +15,21 @@ identity plus the permissions that identity actually holds. The role a
 request may use is then derived from `ctx.user`, never read out of the
 request body.
 
+`context_for` is the other half: the served graph's resolve node
+(`atlas/deploy/server.py`) builds the `AtlasContext` the gates read from
+the identity this module proved - `runtime.server_info.user`, which the
+Agent Server fills from `@auth.authenticate` - and from the ticket, never
+from a `context` the caller sent. A run with no proved role gets the role
+"anonymous", which `ROLE_TOOL_PERMISSIONS` grants nothing: default deny.
+
 DELIBERATELY NOT WIRED INTO `langgraph.json`. Adding the `auth` key makes
-every request to a locally running `langgraph up` need a token, which would
-break the book's promise that a reader can run everything with no accounts
-and no setup. Chapter 23 prints the one-line config change to make when you
-deploy this for real:
+every request to a locally running server need a token. Chapter 23 prints
+the one-line config change to make when you deploy this for real:
 
     "auth": {"path": "./atlas/auth.py:auth"}
+
+Without it every caller is anonymous, so the served graph's role gate
+refuses every tool call: the server runs, and the gates hold.
 
 TOKENS ARE SEEDED AND MOCKABLE, like every other backend in this repo. In a
 real deployment `verify_token` calls your identity provider and this table
@@ -32,6 +40,8 @@ from typing import Any
 
 from langgraph_sdk import Auth
 
+from atlas.security import AtlasContext
+
 auth = Auth()
 
 # The seeded directory. Maps an opaque token to who holds it and what role
@@ -39,7 +49,7 @@ auth = Auth()
 # atlas/security.py is what a role then means in terms of tools.
 DEV_IDENTITIES: dict[str, dict[str, str]] = {
     "dev-agent-token": {"identity": "agent-7", "role": "support_agent"},
-    "dev-readonly-token": {"identity": "auditor-2", "role": "read_only"},
+    "dev-readonly-token": {"identity": "auditor-2", "role": "support_readonly"},
 }
 
 
@@ -86,6 +96,14 @@ def role_of(user: Any) -> str | None:
     return None
 
 
+def context_for(user: Any, customer_id: str | None) -> AtlasContext:
+    """The `AtlasContext` a served run gets: the proved role, or none."""
+    return AtlasContext(
+        role=role_of(user) or "anonymous",  # no proved role: no tools
+        customer_id=customer_id or "unknown",
+    )
+
+
 @auth.on
 async def deny_by_default(ctx: Auth.types.AuthContext, value: Any) -> bool:
     """Default deny, the same posture atlas/security.py takes on tools. A
@@ -94,17 +112,35 @@ async def deny_by_default(ctx: Auth.types.AuthContext, value: Any) -> bool:
     return False
 
 
+def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str]:
+    """Stamp a new resource with its owner, then filter every access to it."""
+    if ctx.action in ("create", "create_run"):
+        value.setdefault("metadata", {})["owner"] = ctx.user.identity
+    return {"owner": ctx.user.identity}
+
+
 @auth.on.threads
 async def threads_are_scoped_to_their_owner(
     ctx: Auth.types.AuthContext, value: Any
 ) -> dict[str, str]:
     """Returning a dict makes it a metadata filter: the caller only sees, and
-    only touches, threads stamped with their own identity.
+    only touches, threads stamped with their own identity, and a thread it
+    creates is stamped with that identity (the pinned SDK's own pattern).
 
     This is the tenancy boundary Chapter 13's per-customer namespace draws
     inside the store, drawn again at the API. Without it, an authenticated
     caller is authenticated to everyone's conversations at once."""
-    return {"owner": ctx.user.identity}
+    return _owned(ctx, value)
+
+
+@auth.on.crons
+async def crons_are_scoped_to_their_owner(
+    ctx: Auth.types.AuthContext, value: Any
+) -> dict[str, str]:
+    """Chapter 22's scheduled monitor is a cron. Without this handler the
+    default deny above refuses `crons.create`; with it, a cron is owned the
+    way a thread is, and its runs carry the owner's identity."""
+    return _owned(ctx, value)
 
 
 @auth.on.assistants

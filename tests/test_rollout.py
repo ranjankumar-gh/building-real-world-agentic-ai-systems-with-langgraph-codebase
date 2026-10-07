@@ -1,95 +1,91 @@
 """Chapter 22, "Deployment and Scaling" - atlas/deploy/rollout.py.
 
 See "The drain-migrate-deploy script". `drain_replica`/`rolling_deploy` are
-orchestration logic over a `load_balancer` interface (`remove`/`add`/
-`request_drain`/`is_drained`), not a live fleet - there is no real load
-balancer or Agent Server in this repo to front, so these tests exercise the
-logic itself against a small fake that implements exactly that interface:
-remove-before-drain, one replica at a time, and a `TimeoutError` when a
-drain never finishes."""
+orchestration logic over a `fleet` interface (`remove`/`terminate`/
+`is_stopped`/`is_ready`/`add`), not a live fleet - there is no real load
+balancer or orchestrator in this repo to drive, so these tests exercise the
+ordering itself against a small fake: out of rotation before SIGTERM, one
+replica at a time, back in only once ready, and a `TimeoutError` when a
+replica never stops or never comes up."""
 
 import pytest
 
-from atlas.deploy.rollout import drain_replica, rolling_deploy
+from atlas.deploy.rollout import SERVER_GRACE_S, drain_replica, rolling_deploy
 
 
-class FakeLoadBalancer:
-    """Records calls and lets a test control when a replica reports drained."""
+class FakeFleet:
+    """Records calls in order; a test controls when replicas stop and start."""
 
-    def __init__(self, drains_immediately: bool = True) -> None:
-        self.removed: list[str] = []
-        self.added: list[str] = []
-        self.drain_requested: list[str] = []
-        self._drains_immediately = drains_immediately
-        self._drained: set[str] = set()
+    def __init__(self, stops: bool = True, ready: bool = True) -> None:
+        self.events: list[tuple[str, str]] = []
+        self._stops = stops
+        self._ready = ready
+        self._stopped: set[str] = set()
 
     def remove(self, replica_id: str) -> None:
-        self.removed.append(replica_id)
+        self.events.append(("remove", replica_id))
+
+    def terminate(self, replica_id: str) -> None:
+        self.events.append(("terminate", replica_id))
+        if self._stops:
+            self._stopped.add(replica_id)
+
+    def is_stopped(self, replica_id: str) -> bool:
+        return replica_id in self._stopped
+
+    def is_ready(self, replica_id: str) -> bool:
+        return self._ready
 
     def add(self, replica_id: str) -> None:
-        self.added.append(replica_id)
-
-    def request_drain(self, replica_id: str) -> None:
-        self.drain_requested.append(replica_id)
-        if self._drains_immediately:
-            self._drained.add(replica_id)
-
-    def is_drained(self, replica_id: str) -> bool:
-        return replica_id in self._drained
+        self.events.append(("add", replica_id))
 
 
-def test_drain_replica_removes_before_requesting_drain():
-    """Removing from rotation before draining is what stops new work from
-    landing on a replica that's about to disappear."""
-    lb = FakeLoadBalancer()
+def test_drain_replica_leaves_the_load_balancer_before_sigterm():
+    """Out of rotation first, so no new HTTP request lands on a replica the
+    server is about to drain."""
+    fleet = FakeFleet()
 
-    drain_replica("r1", lb)
+    drain_replica("r1", fleet)
 
-    assert lb.removed == ["r1"]
-    assert lb.drain_requested == ["r1"]
-
-
-def test_drain_replica_returns_once_is_drained_reports_true():
-    lb = FakeLoadBalancer(drains_immediately=True)
-
-    drain_replica("r1", lb, max_wait_s=5.0)  # would hang were it not drained
-
-    assert lb.is_drained("r1") is True
+    assert fleet.events == [("remove", "r1"), ("terminate", "r1")]
 
 
-def test_drain_replica_times_out_if_never_drained(monkeypatch):
-    """A replica stuck mid-run past max_wait_s raises rather than deploying
-    on top of work that never finished."""
-    lb = FakeLoadBalancer(drains_immediately=False)
+def test_the_default_wait_outlasts_the_servers_grace_period():
+    import inspect
+
+    default = inspect.signature(drain_replica).parameters["max_wait_s"].default
+    assert default > SERVER_GRACE_S == 180.0
+
+
+def test_drain_replica_times_out_if_the_replica_never_stops(monkeypatch):
+    """A replica still running past the wait raises rather than deploying on
+    top of work that never finished."""
+    fleet = FakeFleet(stops=False)
     monkeypatch.setattr("time.sleep", lambda _: None)  # no real waiting in tests
 
-    with pytest.raises(TimeoutError, match="r1"):
-        drain_replica("r1", lb, max_wait_s=0.0)
+    with pytest.raises(TimeoutError, match="r1 did not stop"):
+        drain_replica("r1", fleet, max_wait_s=0.0)
 
 
 def test_rolling_deploy_replaces_replicas_one_at_a_time_in_order():
-    lb = FakeLoadBalancer(drains_immediately=True)
+    fleet = FakeFleet()
     deployed: list[str] = []
 
-    rolling_deploy(["r1", "r2", "r3"], lb, deploy_one=deployed.append)
+    def deploy_one(replica_id: str) -> None:
+        deployed.append(replica_id)
+        fleet.events.append(("deploy", replica_id))
+
+    rolling_deploy(["r1", "r2", "r3"], fleet, deploy_one=deploy_one)
 
     assert deployed == ["r1", "r2", "r3"]
-    assert lb.removed == ["r1", "r2", "r3"]
-    assert lb.added == ["r1", "r2", "r3"]
+    per_replica = ["remove", "terminate", "deploy", "add"]
+    assert fleet.events == [(e, r) for r in ("r1", "r2", "r3") for e in per_replica]
 
 
-def test_rolling_deploy_only_deploys_after_the_prior_replica_is_back_in_rotation():
-    """Never more than one replica out of rotation: deploy_one for r2 must
-    not run until r1 has already been re-added."""
-    lb = FakeLoadBalancer(drains_immediately=True)
-    order: list[str] = []
+def test_a_replica_that_never_becomes_ready_is_not_put_back(monkeypatch):
+    fleet = FakeFleet(ready=False)
+    monkeypatch.setattr("time.sleep", lambda _: None)
 
-    def deploy_one(replica_id: str) -> None:
-        order.append(f"deploy:{replica_id}")
-        # r1 must already be back in rotation before r2's deploy starts.
-        if replica_id == "r2":
-            assert lb.added == ["r1"]
-
-    rolling_deploy(["r1", "r2"], lb, deploy_one=deploy_one)
-
-    assert order == ["deploy:r1", "deploy:r2"]
+    with pytest.raises(TimeoutError, match="r1 was not ready"):
+        rolling_deploy(["r1"], fleet, deploy_one=lambda r: None, ready_wait_s=0.0)
+    assert ("add", "r1") not in fleet.events

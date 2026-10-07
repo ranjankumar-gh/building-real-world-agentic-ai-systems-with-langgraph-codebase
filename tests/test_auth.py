@@ -12,15 +12,20 @@ import asyncio
 from typing import Any
 
 import pytest
+from langchain.agents.middleware import ToolCallRequest
+from langgraph.runtime import Runtime
 from langgraph_sdk import Auth
 
 from atlas.auth import (
     assistants_are_read_only,
     authenticate,
+    context_for,
+    crons_are_scoped_to_their_owner,
     deny_by_default,
     role_of,
     threads_are_scoped_to_their_owner,
 )
+from atlas.security import ROLE_TOOL_PERMISSIONS, AtlasContext, RoleAuthorityGate
 
 
 class _User:
@@ -76,7 +81,8 @@ def test_the_role_is_read_off_the_identity_not_off_the_request() -> None:
     so the answer cannot be supplied by the caller."""
     proved = _authenticate("Bearer dev-readonly-token")
 
-    assert role_of(_User(proved["identity"], proved["permissions"])) == "read_only"
+    proved_user = _User(proved["identity"], proved["permissions"])
+    assert role_of(proved_user) == "support_readonly"
 
 
 def test_an_identity_with_no_role_permission_has_no_role() -> None:
@@ -91,7 +97,8 @@ def test_two_tokens_map_to_two_different_roles() -> None:
     auditor = _authenticate("Bearer dev-readonly-token")
 
     assert role_of(_User(agent["identity"], agent["permissions"])) == "support_agent"
-    assert role_of(_User(auditor["identity"], auditor["permissions"])) == "read_only"
+    auditor_user = _User(auditor["identity"], auditor["permissions"])
+    assert role_of(auditor_user) == "support_readonly"
 
 
 def test_an_unhandled_resource_is_denied_rather_than_allowed() -> None:
@@ -136,3 +143,76 @@ def test_assistants_may_not_be_mutated_whatever_the_role(action: str) -> None:
     ctx = _Ctx(_User("agent-7", ["role:support_agent"]), action=action)
 
     assert asyncio.run(assistants_are_read_only(ctx, {})) is False
+
+
+# --- Role names agree with the permission map; owners are stamped ----------
+
+
+@pytest.mark.parametrize(
+    ("token", "allowed", "refused"),
+    [
+        ("dev-agent-token", {"search_kb", "lookup_ticket", "set_ticket_status"}, set()),
+        ("dev-readonly-token", {"search_kb", "lookup_ticket"}, {"set_ticket_status"}),
+    ],
+)
+def test_every_seeded_role_means_something_to_the_role_gate(
+    token: str, allowed: set[str], refused: set[str]
+) -> None:
+    """A role `authenticate` hands out that ROLE_TOOL_PERMISSIONS does not
+    know would be refused every tool. The read-only token gets the read
+    tools and only those."""
+    proved = _authenticate(f"Bearer {token}")
+    context = context_for(_User(proved["identity"], proved["permissions"]), "C-1")
+    gate = RoleAuthorityGate()
+
+    def verdict(name: str) -> str:
+        request = ToolCallRequest(
+            tool_call={"name": name, "args": {}, "id": "call-1"},
+            tool=None,
+            state=None,
+            runtime=Runtime(context=context),
+        )
+        result = gate.wrap_tool_call(request, lambda r: "ran")
+        return "ran" if result == "ran" else "refused"
+
+    assert {n for n in allowed | refused if verdict(n) == "ran"} == allowed
+
+
+def test_a_caller_with_no_proved_role_is_anonymous_and_gets_no_tools() -> None:
+    context = context_for(None, "C-1")
+
+    assert context == AtlasContext(role="anonymous", customer_id="C-1")
+    assert "anonymous" not in ROLE_TOOL_PERMISSIONS
+
+
+def test_a_created_thread_is_stamped_with_its_owner_then_filtered_to_it() -> None:
+    value: dict[str, Any] = {"metadata": {"source": "web"}}
+
+    result = asyncio.run(
+        threads_are_scoped_to_their_owner(_Ctx(_User("agent-7"), "create"), value)
+    )
+
+    assert value["metadata"] == {"source": "web", "owner": "agent-7"}
+    assert result == {"owner": "agent-7"}
+
+
+def test_a_read_is_filtered_and_stamps_nothing() -> None:
+    value: dict[str, Any] = {}
+
+    ctx = _Ctx(_User("agent-7"), "read")
+    asyncio.run(threads_are_scoped_to_their_owner(ctx, value))
+
+    assert value == {}
+
+
+def test_crons_are_allowed_for_their_owner_not_refused_by_default_deny() -> None:
+    """Chapter 22's monitor cron would hit the global default deny without a
+    crons handler."""
+    value: dict[str, Any] = {}
+
+    result = asyncio.run(
+        crons_are_scoped_to_their_owner(_Ctx(_User("agent-7"), "create"), value)
+    )
+
+    assert result == {"owner": "agent-7"}
+    assert value["metadata"]["owner"] == "agent-7"

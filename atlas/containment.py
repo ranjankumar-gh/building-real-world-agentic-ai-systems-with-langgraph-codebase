@@ -7,17 +7,24 @@ is restored along with the state when Chapter 9's time travel rewinds a
 thread, which hands a run back the authority a human took away - see
 "Authority never sits in state"."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langgraph.store.base import BaseStore
+
+from atlas.security import graph_store
 
 
 def revocation_ns(subject: str) -> tuple:
     """One namespace per subject. Outside every thread, so no checkpoint
     restore can reach it."""
     return ("containment", subject)
+
+
+def _revocation(reason: str) -> dict[str, Any]:
+    return {"reason": reason, "revoked_at": datetime.now(timezone.utc).isoformat()}
 
 
 def revoke(store: BaseStore, subject: str, reason: str) -> None:
@@ -27,11 +34,11 @@ def revoke(store: BaseStore, subject: str, reason: str) -> None:
     one with `build_prod_store(db_uri)` in production. One-way in either
     case: nothing in this module reinstates a revocation, because
     reinstatement is a human decision made outside the run that tripped."""
-    store.put(
-        revocation_ns(subject),
-        "revocation",
-        {"reason": reason, "revoked_at": datetime.now(timezone.utc).isoformat()},
-    )
+    store.put(revocation_ns(subject), "revocation", _revocation(reason))
+
+
+async def arevoke(store: BaseStore, subject: str, reason: str) -> None:
+    await store.aput(revocation_ns(subject), "revocation", _revocation(reason))
 
 
 def is_revoked(store: BaseStore, subject: str) -> bool:
@@ -45,11 +52,14 @@ class RevocationGate(AgentMiddleware):
 
     Raises rather than returning a `ModelResponse`, unlike
     `atlas/cost.py`'s `TenantBudgetGuard.degrade` - see the module's own
-    inline note below `wrap_model_call` for why the two situations aren't
-    the same shape."""
+    inline note below for why the two situations aren't the same shape."""
 
-    def __init__(self, store: BaseStore) -> None:
-        self.store = store
+    def __init__(self, store: BaseStore | None = None) -> None:
+        self.store = store  # only for an agent run with no store of its own
+
+    def _check(self, subject: str, revoked: bool) -> None:
+        if revoked:
+            raise RuntimeError(f"authority revoked for {subject}")  # <1>
 
     def wrap_model_call(
         self,
@@ -57,9 +67,20 @@ class RevocationGate(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         subject: str = request.runtime.context.customer_id
-        if is_revoked(self.store, subject):
-            raise RuntimeError(f"authority revoked for {subject}")  # <1>
+        store = graph_store(request.runtime, self.store)
+        self._check(subject, is_revoked(store, subject))
         return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        subject: str = request.runtime.context.customer_id
+        store = graph_store(request.runtime, self.store)
+        item = await store.aget(revocation_ns(subject), "revocation")
+        self._check(subject, item is not None)
+        return await handler(request)
 
 
 # 1. `TenantBudgetGuard.wrap_model_call` (atlas/cost.py) refuses a call by

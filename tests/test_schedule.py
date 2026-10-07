@@ -40,9 +40,16 @@ class _FakeRuns:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
+    async def create(self, thread_id, assistant_id, **kwargs):
+        self.calls.append(
+            {"thread_id": thread_id, "assistant_id": assistant_id, **kwargs}
+        )
         return {"run_id": "run-1"}
+
+
+class _FakeThreads:
+    async def create(self, **kwargs):
+        return {"thread_id": "thread-1"}
 
 
 class _FakeClient:
@@ -50,9 +57,10 @@ class _FakeClient:
         self.url = url
         self.crons = _FakeCrons()
         self.runs = _FakeRuns()
+        self.threads = _FakeThreads()
 
 
-def test_schedule_quality_monitor_targets_the_resolve_assistant_every_15_minutes(
+def test_schedule_quality_monitor_targets_the_monitor_graph_every_15_minutes(
     monkeypatch,
 ):
     fake = _FakeClient("http://localhost:8123")
@@ -63,7 +71,7 @@ def test_schedule_quality_monitor_targets_the_resolve_assistant_every_15_minutes
     assert result == {"cron_id": "cron-1"}
     assert fake.crons.calls == [
         {
-            "assistant_id": "resolve",
+            "assistant_id": "monitor",
             "schedule": "*/15 * * * *",
             "input": {"sample_rate": 0.05},
         }
@@ -92,17 +100,15 @@ def test_schedule_quality_monitor_uses_the_given_url_sample_rate_and_schedule(
     assert fake.crons.calls[0]["input"] == {"sample_rate": 0.1}
 
 
-def test_notify_on_research_complete_targets_the_research_assistant_with_a_webhook(
+def test_notify_on_research_complete_sends_sources_on_a_new_thread_with_a_webhook(
     monkeypatch,
 ):
     fake = _FakeClient("http://localhost:8123")
     monkeypatch.setattr(schedule_module, "get_client", lambda url: fake)
-    message = {"role": "user", "content": "Compare our SLA to three competitors'."}
 
     result = asyncio.run(
         notify_on_research_complete(
-            thread_id="thread-1",
-            message=message,
+            sources=["web", "docs"],
             webhook="https://internal.atlas.example.com/hooks/research-complete",
         )
     )
@@ -112,10 +118,33 @@ def test_notify_on_research_complete_targets_the_research_assistant_with_a_webho
         {
             "thread_id": "thread-1",
             "assistant_id": "research",
-            "input": {"messages": [message]},
+            "input": {"sources": ["web", "docs"]},
             "webhook": "https://internal.atlas.example.com/hooks/research-complete",
         }
     ]
+
+
+def test_the_cron_and_webhook_inputs_fit_the_graphs_they_target(monkeypatch):
+    """The input each call sends actually runs on the served graph: the
+    monitor graph takes `sample_rate`, the research graph takes `sources`.
+    (The research graph rejected the old `{"messages": [...]}` input with
+    KeyError 'sources'.)"""
+    import atlas.monitor as monitor_module
+    from atlas.deploy.server import monitor
+    from atlas.research import research_graph
+
+    seen: list[float] = []
+    monkeypatch.setattr(monitor_module, "run_quality_monitor", seen.append)
+    fake = _FakeClient("http://localhost:8123")
+    monkeypatch.setattr(schedule_module, "get_client", lambda url: fake)
+    asyncio.run(schedule_quality_monitor())
+    asyncio.run(notify_on_research_complete(sources=["web"], webhook="https://x"))
+
+    monitor.invoke(fake.crons.calls[0]["input"])
+    out = research_graph.invoke(fake.runs.calls[0]["input"])
+
+    assert seen == [0.05]
+    assert [f["source"] for f in out["findings"]] == ["web"]
 
 
 def test_schedule_sla_watch_targets_the_sla_watch_assistant_hourly(monkeypatch):

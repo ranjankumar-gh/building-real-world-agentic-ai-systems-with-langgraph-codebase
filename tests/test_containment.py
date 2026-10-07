@@ -1,6 +1,8 @@
 """Chapter 23: the containment ladder's second rung - revoking authority
 that has already been granted."""
 
+import asyncio
+
 import pytest
 from langchain.agents.middleware import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -114,3 +116,41 @@ def test_a_restored_checkpoint_does_not_resurrect_revoked_authority() -> None:
 
     assert len(resumed["messages"]) == 2  # the reply was recomputed, not restored
     assert is_revoked(store, "customer-42") is True
+
+
+# --- The graph's store, and the async twin ---------------------------------
+
+
+def _request_on(store: InMemoryStore, customer_id: str) -> ModelRequest:
+    request = _request(customer_id, [HumanMessage("hello")])
+    return request.override(
+        runtime=Runtime(context=request.runtime.context, store=store)
+    )
+
+
+def test_an_operator_revoking_in_the_graphs_store_is_seen_by_the_gate() -> None:
+    """The gate reads the store the graph was compiled with, so an operator's
+    `revoke(graph.store, ...)` stops the next call even though the gate was
+    built holding a different store."""
+    graphs = InMemoryStore()
+    revoke(graphs, "customer-42", reason="operator halt")
+
+    with pytest.raises(RuntimeError, match="authority revoked"):
+        RevocationGate(InMemoryStore()).wrap_model_call(
+            _request_on(graphs, "customer-42"), handler=lambda r: "unreachable"
+        )
+
+
+def test_the_async_twin_refuses_a_revoked_subject_too() -> None:
+    store = InMemoryStore()
+    gate = RevocationGate()
+
+    async def handler(_request):
+        return "handled"
+
+    assert asyncio.run(gate.awrap_model_call(_request_on(store, "c-1"), handler)) == (
+        "handled"
+    )
+    revoke(store, "c-1", reason="operator halt")
+    with pytest.raises(RuntimeError, match="authority revoked"):
+        asyncio.run(gate.awrap_model_call(_request_on(store, "c-1"), handler))

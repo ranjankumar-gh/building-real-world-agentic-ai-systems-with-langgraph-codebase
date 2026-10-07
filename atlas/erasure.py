@@ -1,10 +1,11 @@
 """Chapter 23, "Security, Privacy, Cost, and Governance" - the deletion path.
 
-See "Retention, and the erasure request the audit log cannot honour".
+See "Retention, and the erasure request the audit log cannot honor".
 Everything Atlas persists it persists forever: checkpoints accumulate per
 superstep per thread (Ch9), the store holds customer profiles and learned
 facts (Ch13-14), and Ch23's audit log deliberately keeps raw tool arguments
-so a refund stays traceable to an approval. None of it had a delete path.
+and every approval decision, so a refund stays traceable to an approval.
+None of it had a delete path.
 
 `erase_customer` is that path, and it is deliberately partial. It removes
 what Atlas is free to remove and reports what it kept, because the honest
@@ -28,17 +29,33 @@ same leak for search). InMemoryStore matches whole labels and hides it; see
 tests/test_erasure.py's 12-vs-123 tests.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.store.base import BaseStore, Item
 
+from atlas.audit import audit_ns
+from atlas.containment import revocation_ns
 from atlas.memory import SAFE_ID
 
+T = TypeVar("T")
+
 # `list_namespaces` and `search` both paginate, and both default to a page
-# far smaller than a real tenant's data. An erasure that quietly stops at the
-# first page is worse than one that fails loudly.
+# far smaller than a real tenant's data (search returns ten). `_every` reads
+# page after page until a short one, so nothing is left behind a page edge.
 _PAGE = 1000
+
+
+def _every(fetch: Callable[[int], list[T]]) -> list[T]:
+    """Every result of a paginated call, read before anything is deleted."""
+    results: list[T] = []
+    while True:
+        page = fetch(len(results))
+        results.extend(page)
+        if len(page) < _PAGE:
+            return results
 
 
 @dataclass
@@ -71,10 +88,15 @@ def is_customers(namespace: tuple[str, ...], customer_id: str) -> bool:
     return len(namespace) > 1 and namespace[1] == customer_id
 
 
-def audit_ns(customer_id: str) -> tuple[str, ...]:
-    """Ch23's audit namespace. Named here so the erasure path can exclude it
-    on purpose rather than miss it by accident."""
-    return ("audit", customer_id)
+def _own_items(store: BaseStore, namespace: tuple[str, ...]) -> list[Item]:
+    """Items in exactly this namespace: a search also returns its children,
+    and ("audit", "12") is a text prefix of ("audit", "123") on Postgres."""
+    found = _every(lambda offset: store.search(namespace, limit=_PAGE, offset=offset))
+    return [item for item in found if item.namespace == namespace]
+
+
+def _own_audit(store: BaseStore, customer_id: str) -> list[Item]:
+    return _own_items(store, audit_ns(customer_id))
 
 
 def erase_customer(
@@ -91,18 +113,19 @@ def erase_customer(
     in whatever system issued the thread ids. Pretending otherwise would hide
     the one piece of work a real deployment has to do for itself.
     """
-    if not SAFE_ID.fullmatch(customer_id):   # a "%" or "_" would widen the match
+    if not SAFE_ID.fullmatch(customer_id):  # a "%" or "_" would widen the match
         raise ValueError(f"unsafe customer id: {customer_id!r}")
     report = ErasureReport(customer_id=customer_id)
 
-    for namespace in store.list_namespaces(
-        prefix=customer_ns_prefix(customer_id), limit=_PAGE
-    ):
+    namespaces = _every(
+        lambda offset: store.list_namespaces(
+            prefix=customer_ns_prefix(customer_id), limit=_PAGE, offset=offset
+        )
+    )
+    for namespace in namespaces:
         if not is_customers(namespace, customer_id):
             continue  # "customer.123..." also matches the prefix of "12"
-        for item in store.search(namespace, limit=_PAGE):
-            if item.namespace != namespace:
-                continue  # listed on its own; delete each item once
+        for item in _own_items(store, namespace):
             store.delete(namespace, item.key)
             report.items_deleted += 1
         report.namespaces_deleted.append(namespace)
@@ -124,11 +147,10 @@ def erase_customer(
             store.delete(audit_ns(customer_id), item.key)
             report.items_deleted += 1
 
+    # A revocation is an operator's decision about authority, not customer
+    # data. Deleting it would hand authority back, which only a human does
+    # (atlas/containment.py), so it is always kept and always reported.
+    if store.get(revocation_ns(customer_id), "revocation") is not None:
+        report.retained.append((revocation_ns(customer_id), "revocation"))
+
     return report
-
-
-def _own_audit(store: BaseStore, customer_id: str) -> list[Item]:
-    """This customer's audit items only: ("audit", "12") is also a text
-    prefix of ("audit", "123")."""
-    ns = audit_ns(customer_id)
-    return [i for i in store.search(ns, limit=_PAGE) if i.namespace == ns]

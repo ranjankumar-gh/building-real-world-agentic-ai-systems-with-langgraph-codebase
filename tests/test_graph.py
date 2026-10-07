@@ -69,7 +69,7 @@ from langgraph.types import Command, Overwrite
 
 from atlas import graph as graph_module
 from atlas.breaks import ScriptedModel
-from atlas.context import BUDGET
+from atlas.context import BUDGET, trim_history
 from atlas.effects import RefundError
 from atlas.graph import (
     ALLOWED_ROUTES,
@@ -1454,3 +1454,22 @@ def test_a_knowledge_base_miss_retries_then_escalates_end_to_end(monkeypatch):
     assert result["retrieved"] == []
     assert result["retrieve_attempts"] == MAX_RETRIEVE_ATTEMPTS
     assert result["ticket"]["status"] == "escalated"
+
+
+def test_the_scripted_triage_sees_the_budgeted_slice():
+    """Since Chapter 12, triage classifies the budgeted history slice, and
+    `build_graph(model=...)`'s scripted triage (Chapter 21's replay fixture)
+    must see the same slice the real one does, not the whole thread."""
+    seen: list[int] = []
+
+    class Recording(ScriptedModel):
+        def invoke(self, messages: list) -> AIMessage:
+            seen.append(len(messages))
+            return super().invoke(messages)
+
+    long = [HumanMessage("x " * 400) for _ in range(60)]
+    build_graph(model=Recording([AIMessage("answer")])).invoke(
+        {"messages": long}, {"configurable": {"thread_id": "slice"}}
+    )
+    assert seen == [len(trim_history(long, BUDGET.history))]
+    assert seen[0] < 60

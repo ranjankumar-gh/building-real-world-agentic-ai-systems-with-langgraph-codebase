@@ -1,12 +1,20 @@
 # docker-compose.override.yml - scale the API service, share the database
-# Chapter 22, "Deployment and Scaling": layered on top of the docker-compose.yml
-# that `langgraph up` generates, via `docker compose -f docker-compose.yml -f
-# docker-compose.override.yml up`. See "Horizontal scaling: N replicas, one
-# Postgres, one pooler".
+# Chapter 22, "Deployment and Scaling". Layered on the docker-compose.yml that
+# `langgraph dockerfile --add-docker-compose Dockerfile` writes; `docker
+# compose up` then merges this file automatically. (`langgraph up` writes no
+# compose file, so it cannot be overridden this way.) Needs Compose 2.24.4+
+# for `!override`. See "Horizontal scaling: N replicas, one Postgres, one
+# pooler".
 services:
   langgraph-api:
     deploy:
       replicas: 3
-  postgres:
+    ports: !override
+      - "8123-8125:8000" # one host port per replica; a load balancer fronts them
+    environment:
+      LANGGRAPH_POSTGRES_POOL_MAX_SIZE: "20" # per replica; the default is 150
+      BG_JOB_SHUTDOWN_GRACE_PERIOD_SECS: "180" # how long SIGTERM lets runs finish
+    stop_grace_period: 200s # longer than the server's grace, or runs are killed
+  langgraph-postgres:
     deploy:
       replicas: 1 # Postgres is NOT replicated the same way - see the chapter's note <1>
