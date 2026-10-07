@@ -79,9 +79,12 @@ from `list[str]` (a specialist's prose finding) to `list[dict]` (a worker's
 `{"source", "result"}` or `{"source", "error"}` finding); both still merge
 through the same `add` reducer. Research stays its own compiled graph: Atlas's
 support graph (`atlas/graph.py`) does not mount it, since no triage route
-leads to research. `atlas/run.py`'s `run_research` invokes `research_graph`
-directly; Chapter 18's `atlas/deep_research.py` and Chapter 19's streaming
-example import `search_source`/`SourceUnavailable` from here.
+leads to research. `atlas/run.py`'s `run_research` runs the same builder
+compiled onto a checkpointer (`research_runner`), so a resume re-runs only an
+unfinished worker; `research_worker` carries a `RetryPolicy` whose default
+`retry_on` retries the seeded backend's `SourceRateLimited`. Chapter 18's
+`atlas/deep_research.py` and Chapter 19's streaming example import
+`search_source`/`SourceUnavailable` from here.
 
 Chapter 24, "Patterns from Production", retrofits this module with the
 memory horizon (Chapter 13's pattern) it had been missing:
@@ -103,7 +106,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
-from langgraph.types import Command, Send
+from langgraph.types import Command, RetryPolicy, Send
 
 from atlas.memory import SAFE_ID
 from atlas.tools import search_kb, text_of, web_search_tool
@@ -263,15 +266,32 @@ _SOURCES: dict[str, str] = {
     "web/langgraph-overview": "LangGraph is a low-level orchestration runtime.",
 }
 
+# Rate-limit errors still to raise, per source: the seeded stand-in for a
+# provider answering 429. Empty by default; a test or a demo sets a count
+# (`_THROTTLED["docs.internal/sla"] = 1`) and the next lookups of that source
+# raise `SourceRateLimited` until it runs out.
+_THROTTLED: dict[str, int] = {}
+
 
 class SourceUnavailable(RuntimeError):
     """Raised when a research source cannot be reached."""
 
 
+class SourceRateLimited(Exception):
+    """Raised when a research source is throttling us. A plain `Exception`
+    subclass on purpose: LangGraph's default `retry_on` retries it (it
+    declines `RuntimeError`, `ValueError` and the like), so the worker's
+    `RetryPolicy` retries a rate limit and nothing else."""
+
+
 def search_source(source: str) -> str:
     """Look up one research source. Raises `SourceUnavailable` for any
     source not seeded above - the failure `research_worker` below is built
-    to survive without failing the whole fan-out."""
+    to survive without failing the whole fan-out - and `SourceRateLimited`
+    while the source is throttled, which the worker's retry policy absorbs."""
+    if _THROTTLED.get(source, 0) > 0:
+        _THROTTLED[source] -= 1
+        raise SourceRateLimited(f"rate limited: {source}")
     if source not in _SOURCES:
         raise SourceUnavailable(f"source unreachable: {source}")
     return _SOURCES[source]
@@ -292,23 +312,23 @@ def research_worker(state: dict) -> dict:
         # Partial-failure handling lives here: a dead source returns a
         # finding WITH an error, not an exception, so one bad source cannot
         # fail the superstep - the reduce step downstream sees the error and
-        # decides what to do with it.
+        # decides what to do with it. SourceRateLimited is NOT caught: it
+        # propagates to the node's retry policy.
         return {"findings": [{"source": src, "error": str(exc)}]}
 
 
 def plan(state: ResearchState) -> dict:
-    """Entry node for the map-reduce subgraph: `sources` already arrives as
-    input (see `atlas/graph.py`'s `derive_sources` adapter), so `plan` has
-    nothing to add yet - it exists to give `fan_out` a named node to hang
-    `add_conditional_edges` off of, exactly as the chapter's own
-    `builder.add_conditional_edges("plan", fan_out)` shows. A real planner
-    that decomposes a request into sources would live here."""
+    """Entry node: a real planner would decompose the request into sources."""
     return {}
 
 
 research_builder = StateGraph(ResearchState)
 research_builder.add_node("plan", plan)
-research_builder.add_node("research_worker", research_worker)
+research_builder.add_node(
+    "research_worker",
+    research_worker,
+    retry_policy=RetryPolicy(max_attempts=3),  # default retry_on: rate limits
+)
 research_builder.add_edge(START, "plan")
 research_builder.add_conditional_edges("plan", fan_out)  # plan -> N parallel workers
 research_builder.add_edge("research_worker", END)

@@ -43,20 +43,26 @@ up only on the Future, which `_log_failure` logs.
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds `run_research` -
 "Bound the fan-out": ten concurrent workers is fine, a hundred is a
 rate-limit outage, so `max_concurrency` caps how many fanned-out branches
-run at once. Set on `invoke`'s `config`, not on the graph itself - the same
-`research_graph` can be called with a different bound per call.
+run at once. Set on `invoke`'s `config`, not on the graph itself, so each
+call can take its own bound. `research_runner` compiles the research
+builder onto a checkpointer and `run_research` runs on a `thread_id`, so a
+failed superstep keeps the workers that finished and `resume_research`
+re-runs only the unfinished task. The module-level `research_graph` stays
+checkpointer-free for `langgraph.json` and its other importers.
 """
 
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
 from langgraph.types import Command, StateSnapshot
 
 from atlas.graph import graph
 from atlas.memory import reflect
-from atlas.research import research_graph
+from atlas.research import research_builder
 
 logger = logging.getLogger(__name__)
 
@@ -159,14 +165,30 @@ def resume_approval(thread_id: str, decision: dict) -> dict:
     return graph.invoke(Command(resume=decision), config)
 
 
-def run_research(sources: list[str], max_concurrency: int = 8) -> dict:
-    """"Bound the fan-out": run the Chapter 17 map-reduce subgraph directly,
-    capping how many `research_worker` branches run at once. The rest queue
-    and fill in as slots free - the difference between "parallel" and a
-    self-inflicted denial-of-service on your own provider quota."""
-    return research_graph.invoke(
-        {"sources": sources}, config={"max_concurrency": max_concurrency}
-    )
+# Chapter 17: the same map-reduce, compiled onto a checkpointer, so every
+# finished worker's writes are saved and a resume re-runs only the unfinished
+# task. InMemorySaver keeps it offline; production uses a durable saver
+# (Chapter 9).
+research_runner = research_builder.compile(checkpointer=InMemorySaver())
+
+
+def _research_config(thread_id: str, max_concurrency: int) -> RunnableConfig:
+    return {
+        "configurable": {"thread_id": thread_id},
+        "max_concurrency": max_concurrency,
+    }
+
+
+def run_research(sources: list[str], thread_id: str, max_concurrency: int = 8) -> dict:
+    """Run the research fan-out on a thread, at most `max_concurrency`
+    workers at once; the rest queue and fill in as slots free."""
+    config = _research_config(thread_id, max_concurrency)
+    return research_runner.invoke({"sources": sources}, config)
+
+
+def resume_research(thread_id: str, max_concurrency: int = 8) -> dict:
+    """Resume a failed run: only the tasks that did not finish run again."""
+    return research_runner.invoke(None, _research_config(thread_id, max_concurrency))
 
 
 reflection_pool = ThreadPoolExecutor(max_workers=1)  # one reflection at a time

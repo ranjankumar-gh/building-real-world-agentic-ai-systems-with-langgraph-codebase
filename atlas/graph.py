@@ -144,7 +144,7 @@ per-request dict `approval_gate`/`refund` read) and back out with
 `summarize_findings`. Like `triage_with_command`, it is defined but not added
 to the builder: no triage route leads to research, and an unreachable node
 is dead weight. Research stays its own compiled graph - `atlas/run.py`'s
-`run_research` invokes it directly.
+`run_research` runs it directly, compiled onto a checkpointer.
 
 Chapter 17 also factors the builder-assembly wiring into `_make_builder` and
 adds `build_graph(resolve_node=...)`, the seam `atlas/resolve.py` uses to

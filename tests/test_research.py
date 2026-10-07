@@ -53,6 +53,7 @@ from atlas import research as research_module
 from atlas.research import (
     DEFAULT_TTL_DAYS,
     MAX_HANDOFFS,
+    SourceRateLimited,
     SourceUnavailable,
     SupervisorState,
     build_supervisor_graph,
@@ -530,6 +531,30 @@ def test_research_graph_survives_one_dead_source_among_several():
     assert len(findings_by_source) == 3
     assert "error" in findings_by_source["nope/does-not-exist"]
     assert "result" in findings_by_source["docs.internal/refund-policy"]
+
+
+def test_a_rate_limited_lookup_is_retried_by_the_worker_retry_policy(monkeypatch):
+    """research_worker's RetryPolicy keeps the default retry_on, which
+    retries SourceRateLimited (a plain Exception), so a throttled source
+    succeeds on its second attempt instead of failing the superstep."""
+    monkeypatch.setitem(research_module._THROTTLED, "docs.internal/sla", 1)
+
+    result = research_graph.invoke({"sources": ["docs.internal/sla"]})
+
+    assert result["findings"] == [
+        {
+            "source": "docs.internal/sla",
+            "result": "Enterprise SLA guarantees a 4-hour first response.",
+        }
+    ]
+    assert research_module._THROTTLED["docs.internal/sla"] == 0
+
+
+def test_the_default_retry_on_retries_a_rate_limit_but_not_a_dead_source():
+    from langgraph.types import default_retry_on
+
+    assert default_retry_on(SourceRateLimited("429"))
+    assert not default_retry_on(SourceUnavailable("gone"))
 
 
 def test_research_graph_honors_max_concurrency_in_the_invoke_config():

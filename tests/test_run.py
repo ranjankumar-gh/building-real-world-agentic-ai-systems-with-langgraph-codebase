@@ -32,6 +32,7 @@ from atlas.graph import graph, run_durable
 from atlas.run import (
     inspect,
     resume_approval,
+    resume_research,
     run_research,
     run_to_approval,
     run_two_turns,
@@ -320,16 +321,54 @@ def test_run_research_bounds_the_fan_out_and_still_returns_every_finding():
     at a time behind the scenes, but the reducer still merges all of their
     writes - the bound changes throughput, never correctness."""
     result = run_research(
-        ["docs.internal/refund-policy", "docs.internal/sla"], max_concurrency=1
+        ["docs.internal/refund-policy", "docs.internal/sla"],
+        thread_id="research-bound",
+        max_concurrency=1,
     )
 
     assert len(result["findings"]) == 2
 
 
 def test_run_research_defaults_max_concurrency_to_eight():
-    result = run_research(["docs.internal/refund-policy"])
+    result = run_research(["docs.internal/refund-policy"], thread_id="research-8")
 
     assert result["findings"][0]["source"] == "docs.internal/refund-policy"
+
+
+def test_a_crashed_worker_resumes_alone_and_the_finished_ones_are_kept(monkeypatch):
+    """Chapter 17, the Deep Dive's claim made true: on a checkpointer, each
+    finished worker's writes are saved when the superstep fails, and the
+    resume re-runs only the worker that did not finish."""
+    from atlas import research as research_module
+
+    real = research_module.search_source
+    calls: dict[str, int] = {}
+    crash = {"docs.internal/sla": 1}
+
+    def flaky(source: str) -> str:
+        calls[source] = calls.get(source, 0) + 1
+        if crash.get(source):
+            crash[source] -= 1
+            raise KeyError(f"worker crashed on {source}")  # not retried
+        return real(source)
+
+    monkeypatch.setattr(research_module, "search_source", flaky)
+    sources = [
+        "docs.internal/refund-policy",
+        "docs.internal/sla",
+        "web/langgraph-overview",
+    ]
+
+    with pytest.raises(KeyError):
+        run_research(sources, thread_id="research-crash")
+    result = resume_research("research-crash")
+
+    assert calls == {
+        "docs.internal/refund-policy": 1,
+        "docs.internal/sla": 2,
+        "web/langgraph-overview": 1,
+    }
+    assert sorted(f["source"] for f in result["findings"]) == sorted(sources)
 
 
 def test_the_chapter_10_inputs_run_end_to_end_through_the_refund(monkeypatch):
