@@ -12,7 +12,12 @@ decorator applied without changing behavior."""
 
 import pytest
 
-from atlas.effects import RefundError, charge_refund, idempotency_key
+from atlas.effects import (
+    RefundError,
+    RefundRefused,
+    charge_refund,
+    idempotency_key,
+)
 
 
 def test_idempotency_key_is_stable_across_calls_for_the_same_thread_and_ticket():
@@ -102,15 +107,16 @@ def test_charge_refund_charges_the_amount_it_is_given_not_the_original():
 
 def test_charge_refund_refuses_more_than_the_original_and_records_nothing():
     """The provider's cap: an amount above the original charge raises
-    RefundError (the type the refund node's retry_on names, so the refusal
-    lands on Chapter 10's error_handler path) and leaves no ledger entry
-    and no refunded record behind."""
+    RefundRefused - a ValueError, NOT the RefundError the refund node's
+    retry_on names, so the deterministic refusal goes straight to Chapter
+    10's error_handler with no retry - and leaves no ledger entry and no
+    refunded record behind."""
     from atlas import effects
 
     effects._REFUNDS["T-idem-5"] = {"status": "pending", "amount": 49.0}
     key = idempotency_key("thread-over-cap", "T-idem-5")
 
-    with pytest.raises(RefundError, match="exceeds the original"):
+    with pytest.raises(RefundRefused, match="exceeds the original"):
         charge_refund(key, "T-idem-5", 4900.0)
 
     assert key not in effects._LEDGER
@@ -130,3 +136,9 @@ def test_idempotency_key_is_traceable_and_still_returns_the_same_value():
     code path."""
     assert hasattr(idempotency_key, "__wrapped__")
     assert idempotency_key("thread-9", "T-9001") == "refund:thread-9:T-9001"
+
+
+def test_refund_refused_is_outside_the_refund_nodes_retry_on():
+    """A deterministic refusal must not match retry_on=(RefundError,)."""
+    assert issubclass(RefundRefused, ValueError)
+    assert not issubclass(RefundRefused, RefundError)

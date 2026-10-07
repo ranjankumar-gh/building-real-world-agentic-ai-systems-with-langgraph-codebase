@@ -960,8 +960,8 @@ def test_an_amount_above_the_original_is_refused_and_escalates_end_to_end(
 ):
     """The backend's cap, end to end: the ticket asks for more than the
     original charge, the gate's own check (against the ticket) passes it,
-    and the real charge_refund refuses with RefundError - retried by the
-    refund node's policy, then compensated by refund_failed."""
+    and the real charge_refund refuses with RefundRefused. retry_on does
+    not cover it, so there is ONE attempt, then refund_failed compensates."""
     from atlas import effects
 
     effects._REFUNDS["T-0049"] = {"status": "pending", "amount": 49.0}
@@ -979,7 +979,7 @@ def test_an_amount_above_the_original_is_refused_and_escalates_end_to_end(
 
     result = graph.invoke(Command(resume={"type": "approve"}), config)
 
-    assert attempts == [4900.0, 4900.0, 4900.0]
+    assert attempts == [4900.0]  # deterministic refusal: not retried
     assert result.get("refund_done") is not True
     assert result["ticket"] == {"status": "escalated"}
     assert result["error"] == "refund failed; needs manual review"

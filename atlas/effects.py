@@ -13,9 +13,11 @@ real payment provider's `Idempotency-Key` header works.
 `atlas/graph.py`'s `refund` node imports `idempotency_key` and
 `charge_refund` from here and is the only caller. It passes the amount from
 state - the approved amount, after any edit at Chapter 11's approval gate -
-and the backend refuses an amount above the original charge with a
-`RefundError`, so a refusal takes the refund node's retry/error_handler path
-like any other backend rejection.
+and the backend refuses an amount above the original charge with
+`RefundRefused`. That refusal is deterministic - asking again gets the same
+answer - so it is a `ValueError`, outside the refund node's
+`retry_on=(RefundError,)`: `refund_failed` runs after one attempt, with no
+retries.
 
 Chapter 20, "Observability and Debugging with LangSmith", adds `@traceable`
 to `idempotency_key` - see "Turning tracing on, by environment". A plain
@@ -51,6 +53,10 @@ class RefundError(RuntimeError):
     """The payment backend rejected or failed the refund."""
 
 
+class RefundRefused(ValueError):
+    """The amount can never succeed, so retrying it is wasted work."""
+
+
 def charge_refund(key: str, ticket_id: str, amount: float) -> str:
     """Idempotent at the provider: a repeated key returns the first result
     and does not charge again. Refuses more than the original charge."""
@@ -58,7 +64,7 @@ def charge_refund(key: str, ticket_id: str, amount: float) -> str:
         return _LEDGER[key]  # already charged - return prior result
     record = _REFUNDS[ticket_id]
     if amount > record["amount"]:  # the provider's cap: never more than paid
-        raise RefundError(f"{amount:.2f} exceeds the original {record['amount']:.2f}")
+        raise RefundRefused(f"{amount:.2f} exceeds the original {record['amount']:.2f}")
     record["status"] = "refunded"
     result = f"Refund of ${amount:.2f} issued for {ticket_id}."
     _LEDGER[key] = result  # dedup recorded atomically with the charge
