@@ -28,12 +28,21 @@ directly; `StoreBackend` never passes a dict there, so that draft raised
 moment a backend operation ran - confirmed against the installed package,
 not assumed from the docs, and fixed here before the .qmd shipped it."""
 
+import re
+from collections import Counter
 from typing import TypedDict
 
 import pytest
+from deepagents import create_deep_agent
 from deepagents.backends.store import StoreBackend
+from langchain.tools import tool
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.memory import InMemoryStore
+from langgraph.store.postgres.base import _namespace_to_text
 
 from atlas.deep_research import (
     checkpointer,
@@ -171,3 +180,224 @@ def test_deep_research_agent_uses_the_shared_dev_checkpointer_and_store():
     do - not new infrastructure this chapter invents."""
     assert checkpointer is not None
     assert store is not None
+
+
+# --- Chapter 18, "Production considerations": research_namespace refuses an
+# --- id that could widen a PostgresStore prefix match (Chapter 13's SAFE_ID).
+
+
+def _namespace_in_graph(customer_id: str) -> tuple[str, ...]:
+    """Call research_namespace inside a real (tiny) graph run, so
+    get_config() has the customer_id in context."""
+
+    class _S(TypedDict):
+        ns: tuple
+
+    def _node(_state: _S) -> dict:
+        return {"ns": research_namespace(runtime=None)}
+
+    builder = StateGraph(_S)
+    builder.add_node("n", _node)
+    builder.add_edge(START, "n")
+    builder.add_edge("n", END)
+    out = builder.compile().invoke(
+        {"ns": ()}, config={"configurable": {"customer_id": customer_id}}
+    )
+    return out["ns"]
+
+
+def _postgres_prefix_matches(prefix: tuple[str, ...], stored: tuple[str, ...]) -> bool:
+    """PostgresStore's search: `store.prefix LIKE '<dot-joined prefix>%'`,
+    where "_" matches any one character and "%" any run."""
+    pattern = _namespace_to_text(prefix) + "%"
+    regex = "".join(
+        ".*" if c == "%" else "." if c == "_" else re.escape(c) for c in pattern
+    )
+    return re.fullmatch(regex, _namespace_to_text(stored), flags=re.DOTALL) is not None
+
+
+@pytest.mark.parametrize("bad_id", ["cust_42", "cust.42", "cust%", "cust-42.research"])
+def test_research_namespace_refuses_an_unsafe_customer_id(bad_id):
+    with pytest.raises(ValueError, match="unsafe customer id"):
+        _namespace_in_graph(bad_id)
+
+
+def test_unsafe_id_would_leak_on_a_postgres_prefix_match():
+    """Why the check exists: unchecked, "cust_42" lists "cust-42"'s files."""
+    assert _postgres_prefix_matches(
+        ("customer", "cust_42", "research"), ("customer", "cust-42", "research")
+    )
+
+
+def test_a_safe_id_cannot_prefix_match_a_longer_id():
+    """The 12-vs-123 case: the namespace ends in "research", so customer
+    12's prefix never reaches customer 123's files."""
+    ns_12 = _namespace_in_graph("12")
+    ns_123 = _namespace_in_graph("123")
+
+    assert ns_12 == ("customer", "12", "research")
+    assert not _postgres_prefix_matches(ns_12, ns_123)
+    assert _postgres_prefix_matches(ns_12, ns_12)
+
+
+# --- "The task tool fans out through Send" and "StateBackend vs StoreBackend":
+# --- a content-driven fake model (deterministic under concurrent sub-agents)
+# --- drives create_deep_agent with the chapter's shape. No network.
+
+_lookups: Counter = Counter()
+_fail_once: set[str] = set()
+
+
+@tool
+def flaky_lookup(source: str) -> str:
+    """Look up one source; raises once for a source in _fail_once."""
+    _lookups[source] += 1
+    if source in _fail_once:
+        _fail_once.discard(source)
+        raise RuntimeError(f"source crashed: {source}")
+    return f"finding for {source}"
+
+
+def _call(name: str, args: dict, call_id: str) -> dict:
+    return {"name": name, "args": args, "id": f"{name}-{call_id}"}
+
+
+class _ResearchModel(BaseChatModel):
+    """Main agent: three `task` calls in one message, then `ls /findings`,
+    then a report (a "list" request only lists). Sub-agent: look up its
+    source, write /findings/<source>.md, finish."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-research"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        system = " ".join(
+            str(m.content) for m in messages if isinstance(m, SystemMessage)
+        )
+        first = next(m for m in messages if isinstance(m, HumanMessage))
+        last = messages[-1]
+        seen = [m.name for m in messages if isinstance(m, ToolMessage)]
+        if "Investigate the assigned source" in system:
+            src = first.content.split()[-1]
+            if not seen:
+                msg = AIMessage(
+                    "", tool_calls=[_call("flaky_lookup", {"source": src}, src)]
+                )
+            elif seen == ["flaky_lookup"]:
+                args = {"file_path": f"/findings/{src}.md", "content": last.content}
+                msg = AIMessage("", tool_calls=[_call("write_file", args, src)])
+            else:
+                msg = AIMessage(f"done {src}")
+        elif not seen and first.content != "list":
+            calls = [
+                _call(
+                    "task",
+                    {"description": f"investigate {s}", "subagent_type": "researcher"},
+                    s,
+                )
+                for s in ("s1", "s2", "s3")
+            ]
+            msg = AIMessage("", tool_calls=calls)
+        elif "ls" not in seen:
+            msg = AIMessage("", tool_calls=[_call("ls", {"path": "/findings"}, "ls")])
+        else:
+            msg = AIMessage("report")
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
+def _research_agent(backend=None, store=None):
+    researcher = {
+        "name": "researcher",
+        "description": "Investigates one source.",
+        "system_prompt": "Investigate the assigned source using flaky_lookup.",
+        "tools": [flaky_lookup],
+    }
+    extra = {"backend": backend} if backend is not None else {}
+    return create_deep_agent(
+        model=_ResearchModel(),
+        tools=[flaky_lookup],
+        system_prompt="You are a deep research agent.",
+        subagents=[researcher],
+        checkpointer=InMemorySaver(),
+        store=store,
+        **extra,
+    )
+
+
+def _last_ls(result: dict) -> str | None:
+    listings = [
+        m.content
+        for m in result["messages"]
+        if isinstance(m, ToolMessage) and m.name == "ls"
+    ]
+    return listings[-1] if listings else None
+
+
+def test_parallel_task_calls_are_separate_sends_and_resume_reruns_only_the_failed_one():
+    """Three `task` calls in one message are three tasks in one superstep
+    (create_agent sends each tool call as its own Send). One sub-agent
+    crashes: its siblings' results stay checkpointed, and a resume re-runs
+    only the call that failed."""
+    _lookups.clear()
+    _fail_once.clear()
+    _fail_once.add("s2")
+    agent = _research_agent()
+    config = {"configurable": {"thread_id": "t-send"}}
+
+    with pytest.raises(RuntimeError, match="source crashed: s2"):
+        agent.invoke({"messages": [{"role": "user", "content": "report"}]}, config)
+    snapshot = agent.get_state(config)
+    assert snapshot.next == ("tools",)
+    assert sorted(t.error is not None for t in snapshot.tasks) == [False, False, True]
+    assert _lookups == Counter({"s1": 1, "s2": 1, "s3": 1})
+
+    result = agent.invoke(None, config)
+    assert _lookups == Counter({"s1": 1, "s2": 2, "s3": 1})
+    assert result["messages"][-1].content == "report"
+
+
+def test_state_backend_files_stay_in_the_writing_threads_checkpoint():
+    """Default backend: the files are still in thread A's checkpoint after
+    the run; a new thread for the same customer cannot see them."""
+    _lookups.clear()
+    _fail_once.clear()
+    agent = _research_agent()
+    thread_a = {
+        "configurable": {"thread_id": "research-9001", "customer_id": "cust-42"}
+    }
+    thread_b = {
+        "configurable": {"thread_id": "research-9002", "customer_id": "cust-42"}
+    }
+
+    agent.invoke({"messages": [{"role": "user", "content": "report"}]}, thread_a)
+    files = agent.get_state(thread_a).values["files"]
+    assert sorted(files) == ["/findings/s1.md", "/findings/s2.md", "/findings/s3.md"]
+
+    later = agent.invoke({"messages": [{"role": "user", "content": "list"}]}, thread_b)
+    assert _last_ls(later) == "[]"
+
+
+def test_store_backend_files_reach_a_new_thread_for_the_same_customer():
+    _lookups.clear()
+    _fail_once.clear()
+    scoped_store = InMemoryStore()
+    backend = StoreBackend(store=scoped_store, namespace=research_namespace)
+    agent = _research_agent(backend=backend, store=scoped_store)
+    thread_a = {
+        "configurable": {"thread_id": "research-9001", "customer_id": "cust-42"}
+    }
+    thread_b = {
+        "configurable": {"thread_id": "research-9002", "customer_id": "cust-42"}
+    }
+    other = {"configurable": {"thread_id": "research-9003", "customer_id": "cust-99"}}
+
+    agent.invoke({"messages": [{"role": "user", "content": "report"}]}, thread_a)
+    later = agent.invoke({"messages": [{"role": "user", "content": "list"}]}, thread_b)
+    stranger = agent.invoke({"messages": [{"role": "user", "content": "list"}]}, other)
+
+    assert "/findings/s1.md" in _last_ls(later)
+    assert _last_ls(stranger) == "[]"

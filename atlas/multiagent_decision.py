@@ -7,28 +7,36 @@ code exists, Atlas can answer two questions on paper: is a split even
 simple - the point is not precision, it is forcing the comparison before
 the rebuild, while changing your mind is still free.
 
-`Task.fits_one_context` is the guard most teams skip: a task that already
-fits comfortably in one context budget (Chapter 12) does not need
-splitting even if it *could* be split, because the single agent keeps the
-whole context intact and skips the coordination tax entirely."""
+`Task.fits_one_context` is the guard most teams skip: a parallel or
+tool-heterogeneous task that already fits comfortably in one context budget
+(Chapter 12) does not need splitting even if it *could* be split, because
+the single agent keeps the whole context intact and skips the coordination
+tax entirely. The guard does not apply to an isolation boundary: a wall
+that safety, audit, or compliance requires is a requirement, so it splits
+even when the whole job would fit one context.
+
+`multi_agent_cost` models the serial case only. For a parallel fan-out the
+workers overlap, so the latency line becomes (steps_each + 1) * s_per_call:
+one worker's steps plus the coordinator's hop."""
 
 from dataclasses import dataclass
 
 
 @dataclass
 class Task:
-    parallel_independent: bool  # subtasks that can run at once, without each other's context
+    parallel_independent: bool  # can run at once, without each other's context
     heterogeneous_tools: bool  # subtasks needing genuinely different tools or models
     isolation_boundary: bool  # a hard safety/audit/compliance wall between subtasks
     fits_one_context: bool  # the whole job fits comfortably in one context budget
 
 
 def should_split(task: Task) -> bool:
-    """Stay single by default. A split is justified only when the work has a
-    shape that benefits AND does not already fit cleanly in one agent."""
-    has_qualifying_shape = (
-        task.parallel_independent or task.heterogeneous_tools or task.isolation_boundary
-    )
+    """Stay single by default. An isolation boundary is a requirement, so it
+    splits even when the job fits one context. The other two shapes justify
+    a split only when the job does not already fit cleanly in one agent."""
+    if task.isolation_boundary:
+        return True
+    has_qualifying_shape = task.parallel_independent or task.heterogeneous_tools
     return has_qualifying_shape and not task.fits_one_context
 
 

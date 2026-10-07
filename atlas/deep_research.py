@@ -32,6 +32,15 @@ for what it is, even though the factory here does not otherwise use it) and
 reads `customer_id` out of `get_config()`, the accessor `StoreBackend`'s own
 legacy path already uses internally for the same purpose.
 
+`research_namespace` also applies Chapter 13's `SAFE_ID` check before it
+builds the tuple. `StoreBackend`'s `ls`/`glob`/`grep` list files with
+`store.search(namespace)`, which takes a namespace PREFIX, and PostgresStore
+matches a prefix as `prefix LIKE '<dot-joined namespace>%'`. deepagents'
+own validator allows "_" and "." in a namespace component, and "_" is a
+LIKE wildcard, so an unchecked "cust_42" would list "cust-42"'s research
+files. `SAFE_ID` refuses "_", "." and "%", the same rule `profile_ns`
+enforces for profile facts.
+
 `checkpointer`/`store` are the same Chapter 9 / Chapter 13 dev defaults
 `atlas/graph.py` and `atlas/memory.py` already establish - `InMemorySaver`
 and `build_dev_store()` - so this module needs no new infrastructure to
@@ -64,8 +73,9 @@ from deepagents.backends.store import StoreBackend
 from langchain.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_config, get_stream_writer
+from langgraph.runtime import Runtime
 
-from atlas.memory import build_dev_store
+from atlas.memory import SAFE_ID, build_dev_store
 from atlas.research import SourceUnavailable, search_source
 
 
@@ -91,27 +101,28 @@ source_researcher = {
     "description": "Investigates one research source and writes a finding to disk.",
     "system_prompt": (
         "Investigate the assigned source using source_lookup. Write your finding to "
-        "findings/<source>.md via write_file. Investigate only the assigned source."
+        "/findings/<source>.md via write_file. Investigate only the assigned source."
     ),
     "tools": [source_lookup],
 }
 
 
-def research_namespace(runtime) -> tuple[str, str, str]:
+def research_namespace(runtime: Runtime) -> tuple[str, str, str]:
     """Scope research artifacts the same way Chapter 13 scoped profile facts.
 
     `StoreBackend` calls this with its own `Runtime`, not the run's `config`
     dict - `Runtime` deliberately does not carry `config` (see the module
     docstring), so `customer_id` is read back out of the active
     `RunnableConfig` via `get_config()` instead of a `runtime[...]` lookup.
+    An id that could widen a prefix match is refused (see `SAFE_ID`).
     """
     customer_id = get_config()["configurable"]["customer_id"]
+    if not SAFE_ID.fullmatch(customer_id):
+        raise ValueError(f"unsafe customer id: {customer_id!r}")
     return ("customer", customer_id, "research")
 
 
-# Chapter 9 / Chapter 13 dev defaults - the same swap-for-prod pattern
-# atlas/graph.py (checkpointer) and atlas/memory.py (store) already
-# establish, reused here rather than duplicated.
+# Chapter 9 / Chapter 13 dev defaults; production swaps both.
 checkpointer = InMemorySaver()
 store = build_dev_store()
 
@@ -121,7 +132,7 @@ deep_research_agent = create_deep_agent(
     system_prompt=(
         "You are Atlas's deep research agent. Break the request into sources, delegate "
         "each to source_researcher via the task tool, track progress with write_todos, "
-        "and compose a final report from the files under findings/."
+        "and compose a final report from the files under /findings/."
     ),
     subagents=[source_researcher],
     backend=StoreBackend(store=store, namespace=research_namespace),
