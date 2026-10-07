@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.store.base import BaseStore, Item
 
+from atlas.memory import SAFE_ID
+
 # `list_namespaces` and `search` both paginate, and both default to a page
 # far smaller than a real tenant's data. An erasure that quietly stops at the
 # first page is worse than one that fails loudly.
@@ -89,6 +91,8 @@ def erase_customer(
     in whatever system issued the thread ids. Pretending otherwise would hide
     the one piece of work a real deployment has to do for itself.
     """
+    if not SAFE_ID.fullmatch(customer_id):   # a "%" or "_" would widen the match
+        raise ValueError(f"unsafe customer id: {customer_id!r}")
     report = ErasureReport(customer_id=customer_id)
 
     for namespace in store.list_namespaces(

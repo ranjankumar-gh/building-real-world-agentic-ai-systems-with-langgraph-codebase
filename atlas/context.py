@@ -72,13 +72,13 @@ class ContextBudget(AgentMiddleware):
 
 
 def select_docs(docs: list[Doc], max_tokens: int) -> list[Doc]:
-    """Take the highest-scored docs until the retrieved slice is spent.
+    """Take the highest-scored docs that fit the retrieved slice.
     Include the best few that fit, not everything fetched."""
     kept, used = [], 0
     for doc in sorted(docs, key=lambda d: d["score"], reverse=True):
         cost = count_tokens_approximately([HumanMessage(doc["text"])])
         if used + cost > max_tokens:
-            break
+            continue
         kept.append(doc)
         used += cost
     return kept

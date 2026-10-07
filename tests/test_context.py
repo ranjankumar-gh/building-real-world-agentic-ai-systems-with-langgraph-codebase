@@ -144,19 +144,18 @@ def test_select_docs_keeps_the_highest_scored_docs_first():
     assert [d["id"] for d in kept] == ["2", "3", "1"]
 
 
-def test_select_docs_stops_at_the_first_doc_that_does_not_fit():
-    """`select_docs` walks the sorted-by-score list and `break`s on the
-    first doc that would blow the slice - it does not skip ahead to a
-    smaller, lower-ranked doc that might still fit. A budget that is
-    entirely spent by the top-ranked doc yields nothing further."""
+def test_select_docs_skips_a_doc_that_does_not_fit_and_keeps_a_smaller_one():
+    """`select_docs` walks the sorted-by-score list and `continue`s past a
+    doc that would blow the slice, so a smaller, lower-ranked doc that still
+    fits is kept rather than lost behind it."""
     docs = [
         {"id": "big", "text": "word " * 200, "score": 0.9},  # far over budget
-        {"id": "small", "text": "brief", "score": 0.1},  # would fit alone
+        {"id": "small", "text": "brief", "score": 0.1},  # fits on its own
     ]
 
-    kept = select_docs(docs, max_tokens=5)
+    kept = select_docs(docs, max_tokens=20)
 
-    assert kept == []  # breaks on "big" before ever reaching "small"
+    assert [d["id"] for d in kept] == ["small"]
 
 
 def test_select_docs_on_empty_input_returns_empty():

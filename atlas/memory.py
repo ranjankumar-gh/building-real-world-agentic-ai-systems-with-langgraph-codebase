@@ -91,16 +91,19 @@ def profile_ns(customer_id: str) -> tuple[str, ...]:
     return ("customer", customer_id, "profile")
 
 
-def relevant_memories(store: BaseStore, customer_id: str, question: str) -> list[Item]:
+def relevant_memories(
+    store: BaseStore, customer_id: str, question: str, limit: int = 5
+) -> list[Item]:
     """The profile entries most relevant to the question, from this
     customer's namespace and no other."""
     ns = profile_ns(customer_id)
     hits = store.search(
         ns,                      # the full namespace, never ("customer", id)
         query=question,          # ranked by similarity when an index is configured
-        limit=5,                 # cap to the retrieved slice (Ch12's budget)
+        limit=limit * 4,         # over-fetch: the filter below may drop some
     )
-    return [item for item in hits if item.namespace == ns]   # exact match only
+    own = [item for item in hits if item.namespace == ns]   # exact match only
+    return own[:limit]           # the profile's own cap on what enters the prompt
 
 
 def build_dev_store() -> InMemoryStore:
@@ -221,6 +224,8 @@ def submit_langmem_reflection(
     without a config, `submit` outside a graph run raises ValueError. Log
     the returned Future: a failed reflection raises nowhere else."""
     # After the turn returns, defer the memory work for this customer:
+    if not SAFE_ID.fullmatch(customer_id):  # LangMem's namespace takes it verbatim
+        raise ValueError(f"unsafe customer id: {customer_id!r}")
     return reflection.submit(
         {"messages": result["messages"]},
         config={"configurable": {"customer_id": customer_id}},

@@ -107,7 +107,8 @@ swap) - and wires both into Atlas. Both reach the store through
 `runtime.store`, the same `Runtime` handle every node already receives.
 `recall` runs first on every turn (START -> recall -> triage): it loads the
 customer's profile entries most relevant to the new question into
-`customer_profile` before anything reasons about the turn. `remember` runs
+`customer_profile` before anything reasons about the turn, and `answer`
+passes that profile to `compose_answer`, which names the last issue. `remember` runs
 after `answer` (answer -> remember -> END), the one path where Atlas
 resolved the question itself: it records the issue this ticket raised under
 the profile's `last_issue` key, so the customer's next thread starts with
@@ -268,9 +269,11 @@ def route_after_retrieve(
 
 def answer(state: AtlasState) -> dict:
     """Chapter 12: only the best-scored documents that fit the retrieved
-    slice reach the reply - fetching ten does not mean using ten."""
+    slice reach the reply - fetching ten does not mean using ten. Chapter 13:
+    the profile `recall` loaded reaches the reply too."""
     docs = select_docs(state["retrieved"], BUDGET.retrieved)
-    reply = compose_answer(state["messages"], docs)
+    profile = state.get("customer_profile")          # Chapter 13: recall wrote it
+    reply = compose_answer(state["messages"], docs, profile=profile)
     # compose_answer returns a str, and add_messages coerces a bare str into a
     # HumanMessage - wrap it so the reply is recorded as the assistant's turn.
     return {"messages": [AIMessage(content=reply)]}

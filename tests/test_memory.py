@@ -199,6 +199,24 @@ def test_relevant_memories_keeps_only_the_exact_namespace():
     assert [i.value["value"] for i in relevant_memories(store, "12", "q")] == ["mine"]
 
 
+def test_relevant_memories_over_fetches_so_sub_namespace_hits_cannot_starve_it():
+    """Five sub-namespace items ahead of the two real entries would fill a
+    plain limit=5 page and leave nothing after the exact-namespace filter;
+    over-fetching, then filtering, then slicing keeps the real entries."""
+    store = LikePrefixStore()
+    for i in range(5):
+        store.put((*profile_ns("12"), "archive"), f"old-{i}", {"value": "archived"})
+    store.put(profile_ns("12"), "last_issue", {"value": "sync fails"})
+    store.put(profile_ns("12"), "contact_preference", {"value": "email"})
+
+    plain = [i for i in store.search(profile_ns("12"), limit=5)
+             if i.namespace == profile_ns("12")]
+    assert plain == []  # what a filter-after-limit would have returned
+
+    found = relevant_memories(store, "12", "q")
+    assert sorted(i.key for i in found) == ["contact_preference", "last_issue"]
+
+
 @requires_postgres
 def test_live_postgres_prefix_leak_and_the_fix():
     """Skipped by default. On a live PostgresStore (no index needed), the
@@ -431,6 +449,17 @@ def test_langmem_submit_without_a_config_fails_outside_a_graph_run():
     try:
         with pytest.raises(ValueError, match="configurable context"):
             reflection.submit({"messages": []}, after_seconds=0)
+    finally:
+        reflection.shutdown()
+
+
+def test_submit_langmem_reflection_refuses_an_unsafe_customer_id():
+    """LangMem fills `{customer_id}` into its namespace verbatim, so an id
+    with a LIKE wildcard is refused before submit, as profile_ns refuses it."""
+    _manager, reflection = build_langmem_pipeline(build_dev_store())
+    try:
+        with pytest.raises(ValueError, match="unsafe customer id"):
+            submit_langmem_reflection(reflection, "1_", {"messages": []})
     finally:
         reflection.shutdown()
 

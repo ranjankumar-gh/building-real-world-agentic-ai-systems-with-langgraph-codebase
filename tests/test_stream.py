@@ -24,7 +24,7 @@ def _stub_the_model_seams(monkeypatch, route: str = "answer") -> None:
     monkeypatch.setattr(graph_module, "classify", lambda messages: _decision(route))
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "final answer"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "final answer"
     )
 
 

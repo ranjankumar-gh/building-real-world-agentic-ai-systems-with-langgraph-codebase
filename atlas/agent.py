@@ -39,8 +39,9 @@ the model binding it prints is the string id, for brevity. The REAL
 constructing a second `SummarizationMiddleware`: `create_agent`
 identifies middleware by class alone for any type without a further
 discriminator (the same rule Chapter 8's `pii_type` collision illustrated
-for `PIIMiddleware`), so two separate `SummarizationMiddleware` instances - even with identical config - collide
-with `AssertionError: Please remove duplicate middleware instances.`
+for `PIIMiddleware`), so two separate `SummarizationMiddleware` instances -
+even with identical config - collide with `AssertionError: Please remove
+duplicate middleware instances.`
 `ContextBudget` is the first `wrap_model_call` hook in the stack; it wraps
 the model invocation itself, which always runs after every `before_model`
 hook (`pii`'s and `summarizer`'s) regardless of its list position - so

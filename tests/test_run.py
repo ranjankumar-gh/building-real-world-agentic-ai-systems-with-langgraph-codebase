@@ -77,7 +77,7 @@ def test_run_two_turns_restores_history_on_the_same_thread(monkeypatch):
         graph_module,
         "compose_answer",
         # compose_answer returns a str; `answer` wraps it in an AIMessage.
-        lambda messages, retrieved: "Yes, two weeks is within policy.",
+        lambda messages, retrieved, **_: "Yes, two weeks is within policy.",
     )
 
     result = run_two_turns("test-thread-two-turns")
@@ -99,7 +99,7 @@ def test_inspect_reports_a_finished_run_with_an_empty_next(monkeypatch):
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
     thread_id = "test-thread-inspect"
 
@@ -121,7 +121,7 @@ def test_two_different_threads_do_not_share_history(monkeypatch):
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
 
     graph.invoke(
@@ -150,7 +150,7 @@ def test_run_with_durability_defaults_to_sync_and_still_returns_the_normal_resul
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
 
     result = run_with_durability("test-thread-durability-sync", "hi")
@@ -164,7 +164,7 @@ def test_run_with_durability_accepts_the_async_mode_for_read_only_paths(monkeypa
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
 
     result = run_with_durability(
@@ -198,7 +198,7 @@ def test_run_with_drain_completes_normally_without_a_drain_request(monkeypatch):
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
 
     result = run_with_drain("test-thread-no-drain", "hi")
@@ -290,7 +290,7 @@ def test_run_durable_persists_to_a_real_postgres_backend(monkeypatch):
     )
     monkeypatch.setattr(graph_module, "search_kb", lambda messages: [])
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
 
     use_selector_event_loop()

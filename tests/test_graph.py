@@ -262,7 +262,7 @@ def test_retrieve_records_a_knowledge_base_failure_instead_of_crashing(monkeypat
 
 def test_answer_calls_compose_answer_and_wraps_its_result_in_a_delta(monkeypatch):
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "reply"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
     )
     hit = {"id": "kb:1", "text": "Refunds take 5 days.", "score": 1.0}
 
@@ -282,7 +282,7 @@ def test_answer_enforces_the_retrieved_slice_with_select_docs(monkeypatch):
     compose_answer ever sees - whatever order `retrieved` holds them in."""
     seen = {}
 
-    def fake_compose(messages, retrieved):
+    def fake_compose(messages, retrieved, profile=None):
         seen["docs"] = retrieved
         return "reply"
 
@@ -442,6 +442,12 @@ def test_a_second_conversation_sees_the_first_and_another_customer_does_not(
     assert second["customer_profile"] == {
         "last_issue": "My integration keeps failing."
     }
+    # ...and the answer node reads it: the composed reply names the last issue.
+    assert not first["messages"][-1].content.startswith("Following up")
+    assert second["messages"][-1].content.startswith(
+        'Following up on your last ticket ("My integration keeps failing."). '
+    )
+    assert not third["messages"][-1].content.startswith("Following up")
     assert len(second["messages"]) == 2  # a new thread: no history carried over
     assert third["customer_profile"] == {}  # customer 123 sees nothing of 12's
     assert g.store.get(profile_ns("12"), "last_issue").value["ticket"] == "T-2"
@@ -512,7 +518,7 @@ def test_messages_channel_accumulates_via_add_messages_instead_of_clobbering(
     monkeypatch.setattr(
         graph_module,
         "compose_answer",
-        lambda messages, retrieved: (
+        lambda messages, retrieved, **_: (
             "Refunds are available within 30 days of purchase."
         ),
     )
@@ -609,7 +615,7 @@ def test_a_recorded_failure_does_not_escalate_the_next_question(monkeypatch):
         graph_module, "classify", lambda messages: _decision("retrieve")
     )
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "the answer"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "the answer"
     )
     config = {"configurable": {"thread_id": "test-thread-stale-error"}}
 
@@ -636,7 +642,7 @@ def test_a_second_question_on_the_same_thread_starts_with_no_documents(
         graph_module, "classify", lambda messages: _decision("retrieve")
     )
     monkeypatch.setattr(
-        graph_module, "compose_answer", lambda messages, retrieved: "the answer"
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "the answer"
     )
     config = {"configurable": {"thread_id": "test-thread-retrieved-reset"}}
 

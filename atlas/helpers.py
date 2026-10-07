@@ -69,16 +69,24 @@ def search_kb(messages: list) -> list[Doc]:
     return [Doc(id=f"kb:{query.strip().lower()[:64]}", text=article, score=1.0)]
 
 
-def compose_answer(messages: list, retrieved: list[Doc]) -> str:
+def compose_answer(
+    messages: list, retrieved: list[Doc], profile: dict[str, str] | None = None
+) -> str:
     """Compose a reply from the conversation and whatever was retrieved.
 
     Deterministic on purpose (see the module docstring). Grounded strictly in
     `retrieved`: with nothing retrieved this says so rather than inventing an
-    answer, which is the behaviour the escalation path depends on."""
+    answer, which is the behaviour the escalation path depends on.
+
+    Chapter 13 adds `profile`, the `customer_profile` that `recall` loaded:
+    when it holds the customer's `last_issue`, the reply opens by naming it,
+    so a returning customer hears that Atlas remembers."""
+    last = (profile or {}).get("last_issue")
+    opener = f'Following up on your last ticket ("{last}"). ' if last else ""
     if not retrieved:
         return (
-            "I could not find an article covering that. Passing this to a "
-            "support specialist who can help."
+            f"{opener}I could not find an article covering that. Passing this "
+            "to a support specialist who can help."
         )
     body = " ".join(doc["text"] for doc in retrieved)
-    return f"{body} Let me know if that does not answer your question."
+    return f"{opener}{body} Let me know if that does not answer your question."

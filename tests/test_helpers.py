@@ -64,3 +64,25 @@ def test_knowledge_base_unavailable_no_longer_lives_in_helpers():
     """Chapter 7 moves this exception to atlas.tools, next to the real
     search_kb tool that can raise it."""
     assert not hasattr(helpers, "KnowledgeBaseUnavailable")
+
+
+def test_compose_answer_names_the_last_issue_from_the_profile():
+    """Chapter 13: the profile recall loaded reaches the reply."""
+    docs = [{"id": "kb:1", "text": "Re-run the sync.", "score": 1.0}]
+    profile = {"last_issue": "My integration keeps failing."}
+
+    reply = helpers.compose_answer([], docs, profile=profile)
+
+    assert reply.startswith(
+        'Following up on your last ticket ("My integration keeps failing."). '
+    )
+    assert "Re-run the sync." in reply
+
+
+def test_compose_answer_without_a_profile_is_unchanged():
+    docs = [{"id": "kb:1", "text": "Re-run the sync.", "score": 1.0}]
+
+    assert helpers.compose_answer([], docs) == helpers.compose_answer(
+        [], docs, profile={}
+    )
+    assert not helpers.compose_answer([], docs).startswith("Following up")

@@ -173,3 +173,15 @@ def test_retained_audit_reports_only_this_customers_records():
     report = erase_customer(_twelve_and_123(), "12", thread_ids=[])
 
     assert report.retained == [(audit_ns("12"), "call-1")]
+
+
+def test_erase_customer_refuses_an_unsafe_id():
+    """"1_" would match customer 12's namespaces as a LIKE pattern; it is
+    refused before anything is listed or deleted."""
+    import pytest
+
+    store = _twelve_and_123()
+
+    with pytest.raises(ValueError, match="unsafe customer id"):
+        erase_customer(store, "1_", thread_ids=[], retain_audit=False)
+    assert store.get(("customer", "12", "profile"), "plan") is not None
