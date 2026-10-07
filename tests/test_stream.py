@@ -112,6 +112,93 @@ def test_stream_atlas_carries_the_route_triage_decided_in_its_updates_payload(
     assert [update["route"] for update in triage_updates] == ["escalate"]
 
 
+# --- The resolved graph streams with its context ---------------------------
+
+
+class TokenModel(BaseChatModel):
+    """Streams a fixed answer one word at a time; calls no tools."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "token"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "TokenModel":
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        message = AIMessage("Your refund is on its way.")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(
+        self, messages, stop=None, run_manager=None, **kwargs
+    ) -> Iterator[ChatGenerationChunk]:
+        for delta in ["Your ", "refund ", "is ", "on ", "its ", "way."]:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=delta))
+
+
+def _resolved_graph_with_a_token_model(monkeypatch):
+    """Chapter 17's build_resolved_graph, whole middleware stack live, with
+    triage forced to "answer" and the resolve agent's model scripted."""
+    import atlas.agent as agent_module
+    from atlas.resolve import build_resolved_graph
+
+    _stub_the_model_seams(monkeypatch)
+    monkeypatch.setattr(agent_module, "model", TokenModel())
+    return build_resolved_graph()
+
+
+def _model_tokens(events: list[dict]) -> tuple[str, set[tuple]]:
+    tokens = [
+        event
+        for event in events
+        if event["kind"] == "messages"
+        and isinstance(event["data"][0], AIMessageChunk)
+        and event["data"][1].get("langgraph_node") == "model"
+    ]
+    text = "".join(event["data"][0].text for event in tokens)
+    return text, {event["source"] for event in tokens}
+
+
+def test_stream_atlas_streams_the_resolved_graph_given_its_context(monkeypatch):
+    """The chapter's production call: build_resolved_graph()'s mounted agent
+    declares AtlasContext, so stream_atlas must pass context= through."""
+    from atlas.security import AtlasContext
+
+    graph = _resolved_graph_with_a_token_model(monkeypatch)
+    config = {"configurable": {"thread_id": "test-thread-stream-resolved"}}
+    context = AtlasContext(role="customer", customer_id="c-1")
+    inputs = {"messages": [{"role": "user", "content": "where is my refund?"}]}
+
+    events = list(stream_atlas(inputs, config, graph=graph, context=context))
+
+    text, sources = _model_tokens(events)
+    assert text == "Your refund is on its way."
+    assert sources and all(source[0].startswith("answer:") for source in sources)
+
+
+def test_stream_detached_forwards_the_context_to_the_run(monkeypatch):
+    from atlas.security import AtlasContext
+
+    graph = _resolved_graph_with_a_token_model(monkeypatch)
+    config = {"configurable": {"thread_id": "test-thread-detached-resolved"}}
+    context = AtlasContext(role="customer", customer_id="c-1")
+    inputs = {"messages": [{"role": "user", "content": "where is my refund?"}]}
+
+    events = list(stream_detached(inputs, config, graph=graph, context=context))
+
+    assert _model_tokens(events)[0] == "Your refund is on its way."
+
+
+def test_the_resolved_graph_without_a_context_fails_at_the_first_gate(monkeypatch):
+    """The control: with no context, the gates have no customer_id to read."""
+    graph = _resolved_graph_with_a_token_model(monkeypatch)
+    config = {"configurable": {"thread_id": "test-thread-stream-no-context"}}
+    inputs = {"messages": [{"role": "user", "content": "where is my refund?"}]}
+
+    with pytest.raises(AttributeError, match="customer_id"):
+        list(stream_atlas(inputs, config, graph=graph))
+
+
 # --- Redaction on the stream ------------------------------------------------
 
 ADDRESS = "jane.doe@example.com"

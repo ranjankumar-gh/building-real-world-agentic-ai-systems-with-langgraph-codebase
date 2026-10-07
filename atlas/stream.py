@@ -31,6 +31,11 @@ tokenizer split across deltas is whole when the pattern sees it.
 loop that reads `graph.stream()` is the loop that drives the run, so closing
 it stops the run at the next step. A run that must finish gets its own
 worker, and the live channel reads a bounded buffer the worker fills.
+
+Both take `context=` and pass it to `graph.stream`. The module-level graph
+declares no context schema and ignores it; `build_resolved_graph()`'s
+mounted agent declares `AtlasContext` (Chapter 23), and its gates read
+`customer_id` off it, so streaming that graph without one fails.
 """
 
 import contextlib
@@ -92,7 +97,7 @@ def hold_back(held: dict[str, str], chunk: AIMessageChunk) -> AIMessageChunk:
 
 
 def stream_atlas(
-    inputs: dict, config: dict, graph: Pregel = atlas_graph
+    inputs: dict, config: dict, graph: Pregel = atlas_graph, context: Any = None
 ) -> Iterator[dict]:
     """Multiplex step status, tokens, and tool progress into one tagged,
     redacted stream."""
@@ -100,6 +105,7 @@ def stream_atlas(
     for chunk in graph.stream(
         inputs,
         config,
+        context=context,  # the run's AtlasContext, when the graph reads one
         stream_mode=["updates", "messages", "custom"],
         subgraphs=True,
         version="v2",
@@ -132,7 +138,11 @@ def offer(buffer: queue.Queue, item: object) -> None:
 
 
 def stream_detached(
-    inputs: dict, config: dict, graph: Pregel = atlas_graph, maxsize: int = 256
+    inputs: dict,
+    config: dict,
+    graph: Pregel = atlas_graph,
+    maxsize: int = 256,
+    context: Any = None,
 ) -> Iterator[dict]:
     """Run the graph in its own worker; the live channel reads a bounded
     buffer. Closing this iterator closes the live channel, not the run. A
@@ -143,7 +153,7 @@ def stream_detached(
     def work() -> None:
         end: object = DONE
         try:
-            for event in stream_atlas(inputs, config, graph):
+            for event in stream_atlas(inputs, config, graph, context):
                 offer(buffer, event)
         except Exception as exc:  # the run failed: say so, don't just stop
             end = exc
