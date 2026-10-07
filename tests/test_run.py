@@ -418,3 +418,30 @@ def test_run_and_reflect_returns_first_and_the_next_thread_recalls_the_fact(
         "last_issue": "Email me, never phone.",
         "contact_preference": "email only",
     }
+
+
+def test_run_and_reflect_keeps_the_reply_when_the_ticket_names_no_customer(
+    monkeypatch,
+):
+    """G3: a turn with no ticket, or a ticket without customer_id, still
+    returns the reply the graph produced and submits no reflection."""
+    from atlas import run as run_module
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("answer")
+    )
+    monkeypatch.setattr(
+        graph_module, "compose_answer", lambda messages, retrieved, **_: "reply"
+    )
+    submitted = []
+    monkeypatch.setattr(
+        run_module.reflection_pool, "submit", lambda *a, **k: submitted.append(a)
+    )
+
+    no_ticket = {"messages": [{"role": "user", "content": "hi"}]}
+    no_customer = {**no_ticket, "ticket": {"id": "T-5", "amount": 0.0}}
+    for i, inputs in enumerate((no_ticket, no_customer)):
+        result = run_module.run_and_reflect(f"test-thread-no-customer-{i}", inputs)
+        assert result["messages"][-1].content == "reply"
+
+    assert submitted == []

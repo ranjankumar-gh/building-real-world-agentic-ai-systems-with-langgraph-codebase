@@ -370,6 +370,52 @@ def test_reflect_extracts_then_compacts(monkeypatch):
     assert item.value["value"] == "prefers email"
 
 
+def test_reflect_numbers_the_messages_and_the_check_uses_those_numbers(
+    monkeypatch,
+):
+    """G4: the extractor sees each message prefixed with its [n] number, so
+    source_turn names a visible index rather than a position the model has
+    to count. This stand-in extractor cites whatever number it sees in front
+    of each line: the customer's preference survives, and the fact lifted
+    from Atlas's reply is dropped."""
+    seen = {}
+
+    def extract_by_visible_number(payload: dict) -> dict:
+        seen["contents"] = [m.content for m in payload["messages"]]
+        facts = []
+        for m in payload["messages"]:
+            n = int(m.content[1 : m.content.index("]")])
+            if "email" in m.content:
+                facts.append(CustomerFact(
+                    key="contact_preference", value="prefers email",
+                    kind="preference", source_turn=n,
+                ))
+            if "legacy plan" in m.content:
+                facts.append(CustomerFact(
+                    key="plan", value="legacy plan", kind="account", source_turn=n,
+                ))
+        return {"structured_response": Extraction(facts=facts)}
+
+    monkeypatch.setattr(memory_module.extractor, "invoke", extract_by_visible_number)
+    messages = [
+        HumanMessage("Hi, quick question."),
+        AIMessage("Sure. You're on the legacy plan."),
+        HumanMessage("Please email me rather than calling."),
+    ]
+
+    store = build_dev_store()
+    reflect(store, "cust-1", messages)
+
+    assert seen["contents"] == [
+        "[0] Hi, quick question.",
+        "[1] Sure. You're on the legacy plan.",
+        "[2] Please email me rather than calling.",
+    ]
+    assert messages[0].content == "Hi, quick question."  # originals untouched
+    kept = {item.key for item in store.search(profile_ns("cust-1"))}
+    assert kept == {"contact_preference"}
+
+
 def test_reflect_drops_a_fact_whose_source_turn_is_not_a_real_customer_turn(
     monkeypatch,
 ):
@@ -459,7 +505,7 @@ def test_submit_langmem_reflection_refuses_an_unsafe_customer_id():
     _manager, reflection = build_langmem_pipeline(build_dev_store())
     try:
         with pytest.raises(ValueError, match="unsafe customer id"):
-            submit_langmem_reflection(reflection, "1_", {"messages": []})
+            submit_langmem_reflection(reflection, "1_", "t-1", {"messages": []})
     finally:
         reflection.shutdown()
 
@@ -485,11 +531,52 @@ def test_submit_langmem_reflection_carries_the_customer_into_the_namespace():
     reflection = ReflectionExecutor(RecordingReflector(), store=store)
     try:
         future = submit_langmem_reflection(
-            reflection, "C-1", {"messages": [HumanMessage("Email me.")]}
+            reflection, "C-1", "t-1", {"messages": [HumanMessage("Email me.")]}
         )
         assert future.result(timeout=10) == (("customer", "C-1", "langmem"), True)
     finally:
         reflection.shutdown()
+
+
+def test_langmem_without_thread_id_one_customer_cancels_another():
+    """Why submit_langmem_reflection passes thread_id. LangMem keys pending
+    work by thread_id; with none, every submit shares one key, so customer
+    C-2's submit cancels customer C-1's pending reflection. With distinct
+    thread_ids both run. A stand-in reflector, no model call."""
+    import time
+
+    from langmem import ReflectionExecutor
+
+    store = build_dev_store()
+    manager, real_executor = build_langmem_pipeline(store)
+    real_executor.shutdown()
+
+    class Done:
+        namespace = manager.namespace
+
+        def invoke(self, payload: dict) -> str:
+            return "done"
+
+    def two_customers(thread_ids: tuple) -> list:
+        reflection = ReflectionExecutor(Done(), store=store)
+        futures = []
+        try:
+            for cid, tid in zip(("C-1", "C-2"), thread_ids, strict=True):
+                conf = {"customer_id": cid, **({"thread_id": tid} if tid else {})}
+                payload = {"messages": [HumanMessage(cid)]}
+                futures.append(
+                    reflection.submit(payload, config={"configurable": conf},
+                                      after_seconds=1)
+                )
+                time.sleep(0.05)  # distinct clock readings: no tie TypeError
+            futures[1].result(timeout=10)
+            time.sleep(0.2)
+            return [f.cancelled() for f in futures]
+        finally:
+            reflection.shutdown(wait=False)
+
+    assert two_customers((None, None)) == [True, False]  # C-1's work was lost
+    assert two_customers(("t-1", "t-2")) == [False, False]
 
 
 @requires_postgres

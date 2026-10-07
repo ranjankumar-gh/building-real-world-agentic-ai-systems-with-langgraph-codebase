@@ -148,7 +148,7 @@ class CustomerFact(BaseModel):
     key: str = Field(description="Stable slug, e.g. 'contact_preference'.")
     value: str = Field(description="The fact, stated plainly.")
     kind: Literal["preference", "account", "issue"]
-    source_turn: int = Field(description="Index of the message it came from.")
+    source_turn: int = Field(description="The [n] number of its message.")
 
 
 class Extraction(BaseModel):
@@ -165,7 +165,8 @@ extractor = create_agent(
     response_format=ProviderStrategy(Extraction),
     system_prompt=(
         "Extract only facts the customer explicitly stated. Do not infer or "
-        "guess. If nothing durable was said, return no facts."
+        "guess. If nothing durable was said, return no facts. Each message "
+        "starts with its number in brackets; set source_turn to that number."
     ),
 )
 
@@ -186,7 +187,11 @@ def compact(
 def reflect(store: BaseStore, customer_id: str, messages: list[AnyMessage]) -> None:
     """The full reflection pass - extract, check, compact. Runs AFTER the
     response, scheduled off the hot path."""
-    result = extractor.invoke({"messages": messages})
+    numbered = [  # the model cites the [n] it sees, not a position it counts
+        m.model_copy(update={"content": f"[{i}] {m.text}"})
+        for i, m in enumerate(messages)
+    ]
+    result = extractor.invoke({"messages": numbered})
     sourced = [
         fact
         for fact in result["structured_response"].facts
@@ -199,7 +204,9 @@ def reflect(store: BaseStore, customer_id: str, messages: list[AnyMessage]) -> N
 def build_langmem_pipeline(
     store: BaseStore,
 ) -> tuple["MemoryStoreManager", "LocalReflectionExecutor"]:
-    """The "build vs. adopt" section's LangMem drop-in for the hand-rolled
+    """LangMem's manager and executor, behind one seam.
+
+    The "build vs. adopt" section's drop-in for the hand-rolled
     extractor/compact/reflect pipeline above (Exercise 3). Returns
     `(manager, reflection)`; call `reflection.shutdown()` when done -
     constructing `ReflectionExecutor` starts a live worker thread
@@ -217,17 +224,26 @@ def build_langmem_pipeline(
 
 
 def submit_langmem_reflection(
-    reflection: "LocalReflectionExecutor", customer_id: str, result: dict
+    reflection: "LocalReflectionExecutor",
+    customer_id: str,
+    thread_id: str,
+    result: dict,
 ) -> Future:
-    """Defer LangMem's memory work for one customer. `{customer_id}` in the
-    manager's namespace is a template filled from this `configurable` dict;
-    without a config, `submit` outside a graph run raises ValueError. Log
-    the returned Future: a failed reflection raises nowhere else."""
-    # After the turn returns, defer the memory work for this customer:
+    """Defer LangMem's memory work for one customer's conversation.
+
+    `{customer_id}` in the manager's namespace is a template filled from
+    this `configurable` dict; without a config, `submit` outside a graph run
+    raises ValueError. `thread_id` is LangMem's pending-work key: a later
+    submit for the same thread replaces a pending one, and with no
+    `thread_id` every submit shares one key, so customer C-2's submit
+    cancels customer C-1's pending reflection (and two submits on the same
+    clock reading raise TypeError comparing the queued tasks). Log the
+    returned Future: a failed reflection raises nowhere else."""
     if not SAFE_ID.fullmatch(customer_id):  # LangMem's namespace takes it verbatim
         raise ValueError(f"unsafe customer id: {customer_id!r}")
+    configurable = {"customer_id": customer_id, "thread_id": thread_id}
     return reflection.submit(
         {"messages": result["messages"]},
-        config={"configurable": {"customer_id": customer_id}},
+        config={"configurable": configurable},
         after_seconds=0,
     )

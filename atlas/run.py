@@ -181,7 +181,9 @@ def run_and_reflect(thread_id: str, inputs: dict) -> dict:
     """Answer now, learn afterwards: the reply never waits on extraction."""
     config = {"configurable": {"thread_id": thread_id}}
     result = graph.invoke(inputs, config)
-    customer_id = inputs["ticket"]["customer_id"]
+    customer_id = (inputs.get("ticket") or {}).get("customer_id")
+    if customer_id is None:
+        return result  # no customer on the ticket: nothing to learn, reply intact
     future = reflection_pool.submit(
         reflect, graph.store, customer_id, result["messages"]
     )
