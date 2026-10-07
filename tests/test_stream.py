@@ -21,6 +21,8 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, TypedDict
 
+import pytest
+
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_core.language_models import BaseChatModel
@@ -256,6 +258,31 @@ def test_hold_back_releases_text_only_up_to_the_last_whitespace():
     assert held == {}
 
 
+def test_hold_back_keeps_tool_call_chunks_and_redacts_them():
+    fragment = {"name": "lookup", "args": f'{{"who": "{ADDRESS}"}}', "id": "c1",
+                "index": 0}
+
+    wire = hold_back({}, AIMessageChunk(content="", id="m", tool_call_chunks=[fragment]))
+
+    assert [c["name"] for c in wire.tool_call_chunks] == ["lookup"]
+    assert wire.tool_call_chunks[0]["args"] == f'{{"who": "{REDACTED}"}}'
+
+
+def test_stream_atlas_streams_the_tool_call_without_the_address():
+    graph = _graph_with_a_streaming_agent()
+
+    events = list(stream_atlas(_inputs(), {}, graph=graph))
+
+    streamed_calls = [
+        chunk
+        for event in events
+        if event["kind"] == "messages" and isinstance(event["data"][0], AIMessageChunk)
+        for chunk in event["data"][0].tool_call_chunks
+    ]
+    assert [c["name"] for c in streamed_calls] == ["lookup"]
+    assert REDACTED in streamed_calls[0]["args"]
+
+
 def test_redact_reaches_messages_tool_calls_and_interrupts():
     message = AIMessage(
         content=f"cc {ADDRESS}",
@@ -323,3 +350,38 @@ def test_closing_stream_detached_closes_the_live_channel_not_the_run():
             break
         time.sleep(0.05)
     assert graph.get_state(config).values["ran"] == ["n1", "n2", "n3"]
+
+
+class RunFailed(Exception):
+    pass
+
+
+def test_stream_detached_raises_the_runs_error_instead_of_ending_quietly():
+    """A failed run must not look like a finished one to the reader - even
+    with a one-slot buffer that drops the oldest event."""
+
+    def boom(state: Steps) -> dict:
+        raise RunFailed("backend down")
+
+    builder = StateGraph(Steps)
+    builder.add_node("n1", lambda state: {"ran": ["n1"]})
+    builder.add_node("boom", boom)
+    builder.add_edge(START, "n1")
+    builder.add_edge("n1", "boom")
+    builder.add_edge("boom", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "worker-fails"}}
+
+    events = stream_detached({"ran": []}, config, graph=graph, maxsize=1)
+
+    with pytest.raises(RunFailed, match="backend down"):
+        list(events)
+
+
+def test_stream_detached_ends_cleanly_when_the_run_completes():
+    graph = _three_steps()
+    config = {"configurable": {"thread_id": "worker-completes"}}
+
+    events = list(stream_detached({"ran": []}, config, graph=graph))
+
+    assert [node for event in events for node in event["data"]] == ["n1", "n2", "n3"]

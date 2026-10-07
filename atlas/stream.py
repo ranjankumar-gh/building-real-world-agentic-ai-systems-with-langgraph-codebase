@@ -71,7 +71,9 @@ def redact(value: Any) -> Any:
 def hold_back(held: dict[str, str], chunk: AIMessageChunk) -> AIMessageChunk:
     """Release a token stream only up to its last whitespace, so an address
     split across deltas is redacted whole. The model's final chunk
-    (`chunk_position="last"`) releases the rest."""
+    (`chunk_position="last"`) releases the rest. Tool-call chunks pass
+    through, redacted fragment by fragment; the whole call, redacted as one,
+    arrives on `updates`."""
     key = chunk.id or ""
     text = held.pop(key, "") + chunk.text
     if chunk.chunk_position == "last":
@@ -81,7 +83,10 @@ def hold_back(held: dict[str, str], chunk: AIMessageChunk) -> AIMessageChunk:
     if cut < len(text):
         held[key] = text[cut:]
     return AIMessageChunk(
-        content=redact(text[:cut]), id=chunk.id, chunk_position=chunk.chunk_position
+        content=redact(text[:cut]),
+        id=chunk.id,
+        chunk_position=chunk.chunk_position,
+        tool_call_chunks=redact(chunk.tool_call_chunks),
     )
 
 
@@ -129,16 +134,23 @@ def stream_detached(
     inputs: dict, config: dict, graph: Pregel = atlas_graph, maxsize: int = 256
 ) -> Iterator[dict]:
     """Run the graph in its own worker; the live channel reads a bounded
-    buffer. Closing this iterator closes the live channel, not the run."""
+    buffer. Closing this iterator closes the live channel, not the run. A
+    run that fails raises its error here, so the reader can tell failure
+    from completion."""
     buffer: queue.Queue = queue.Queue(maxsize=maxsize)
 
     def work() -> None:
+        end: object = DONE
         try:
             for event in stream_atlas(inputs, config, graph):
                 offer(buffer, event)
+        except Exception as exc:  # the run failed: say so, don't just stop
+            end = exc
         finally:
-            offer(buffer, DONE)
+            offer(buffer, end)  # one terminal item, so dropping can't lose it
 
     threading.Thread(target=work, daemon=True).start()
     while (event := buffer.get()) is not DONE:
+        if isinstance(event, Exception):
+            raise event
         yield event
