@@ -514,25 +514,10 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
         identity, refusal = (
             served_approver(runtime) if served else (approval.get("by"), None)
         )  # <5>
-        record, key = approval, approval.get("audit_key")
-        if runtime.store is not None:  # <6>
-            record = approval_on_record(
-                runtime.store, approval.get("customer_id"), key
-            )
-            refusal = refusal or row_refusal(record, ticket, thread_id)
-            if refusal is None and served and (
-                record.get("role") not in APPROVER_ROLES
-                or record.get("by") != identity
-            ):
-                refusal = "refused: the approval on record is not this approver's"
-            if refusal is None and charged_rows(
-                runtime.store, record["customer_id"], approval_key=key
-            ):
-                refusal = "refused: this approval has already been charged"
-        elif served:
-            refusal = refusal or "refused: no audit store to verify the approval"
-        else:  # in process with no store: Chapter 11's record, checked as is
-            refusal = refusal or row_refusal(approval, ticket, None)
+        on_record, record = approval_refusal(
+            runtime, approval, ticket, thread_id, identity, served
+        )  # <6>
+        refusal = refusal or on_record
         record = record or {}
         amount = record.get("amount")
         customer_id = record.get("customer_id") or ticket.get("customer_id")
@@ -541,7 +526,7 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
             "at": datetime.now(UTC).isoformat(),
             "ticket_id": ticket.get("id"),
             "amount": amount,
-            "approval_key": key,
+            "approval_key": approval.get("audit_key"),
         }
         earlier = (
             charged_rows(
@@ -575,6 +560,37 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
         return {**out, "error": None}  # a stale error does not outlive a charge
 
     return authorized_refund
+
+
+def approval_refusal(
+    runtime: Runtime,
+    approval: dict,
+    ticket: dict,
+    thread_id: str,
+    identity: str | None,
+    served: bool,
+) -> tuple[str | None, dict | None]:
+    """Which approval this refund may spend: (why not, or None; the record).
+
+    The record is the gate's own audit row when the graph has a store, and
+    the approval in state only when it has none (in process, as in Chapters
+    10 and 11). The served build refuses rather than fall back to state."""
+    key = approval.get("audit_key")  # state only says where to look
+    if runtime.store is None:
+        if served:
+            return "refused: no audit store to verify the approval", approval
+        return row_refusal(approval, ticket, None), approval  # Chapter 11's record
+    record = approval_on_record(runtime.store, approval.get("customer_id"), key)
+    refusal = row_refusal(record, ticket, thread_id)
+    if refusal is None and served and (
+        record.get("role") not in APPROVER_ROLES or record.get("by") != identity
+    ):
+        refusal = "refused: the approval on record is not this approver's"
+    if refusal is None and charged_rows(
+        runtime.store, record["customer_id"], approval_key=key
+    ):
+        refusal = "refused: this approval has already been charged"
+    return refusal, record
 
 
 def row_refusal(record: dict | None, ticket: dict, thread_id: str | None) -> str | None:
@@ -625,14 +641,15 @@ def row_refusal(record: dict | None, ticket: dict, thread_id: str | None) -> str
 #    goes into `state["approval"]`: it is how `refund` finds the row.
 # 5. Served: the identity of THIS run, checked again here, so a caller who
 #    routes straight to `refund` meets the same role check the gate applies.
-# 6. `state["approval"]` is caller-writable (run input, a `goto` with an
-#    `update`, a thread created with `supersteps`), so it only says where to
-#    look. The authority is the gate's own audit row, which no caller can
-#    write: it must exist for this thread, be an approve or edit, match this
-#    ticket's id, customer and amount, and - served - be by an approver
-#    role and by THIS run's identity. One charge per row: an approval that
-#    already has a "charged" row authorizes nothing more. The refusal goes
-#    in a message, not `error`: the gate may be refusing in the same step.
+# 6. `approval_refusal` reads the record. `state["approval"]` is
+#    caller-writable (run input, a `goto` with an `update`, a thread created
+#    with `supersteps`), so it only says where to look. The authority is the
+#    gate's own audit row, which no caller can write: it must exist for this
+#    thread, be an approve or edit, match this ticket's id, customer and
+#    amount, and - served - be by an approver role and by THIS run's
+#    identity. One charge per row: an approval that already has a "charged"
+#    row authorizes nothing more. The refusal goes in a message, not
+#    `error`: the gate may be refusing in the same step.
 # 7. The provider dedupes on thread + ticket, so a second approval on this
 #    thread for this ticket can never move money again. At the same amount
 #    (a fork re-approving what was charged) the row says "replayed", with
