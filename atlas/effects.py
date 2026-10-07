@@ -62,7 +62,9 @@ def charge_refund(key: str, ticket_id: str, amount: float) -> str:
     """Idempotent at the provider: a repeated key returns the first result
     and does not charge again. Refuses more than the original charge, in
     total: the key is per thread, so two threads refunding one ticket are
-    two keys, and the cap counts what was already refunded."""
+    two keys, and the cap counts what was already refunded. The counter is
+    a read-add-write, not atomic under concurrency: a real payment provider
+    enforces this cap, and this seed only stands in for it."""
     if key in _LEDGER:
         return _LEDGER[key]  # already charged - return prior result
     record = _REFUNDS[ticket_id]
