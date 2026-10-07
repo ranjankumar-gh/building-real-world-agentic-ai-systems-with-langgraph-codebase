@@ -456,7 +456,7 @@ def shown_mismatch(shown: dict | None, ticket: dict, required: bool) -> str | No
 def make_approval_gate(served: bool) -> Callable[..., Command]:
     """Chapter 23: Chapter 11's gate, bound and audited. On the served build
     the approver is the authenticated identity, must hold an approver role,
-    and must echo the ticket and amount the interrupt showed."""
+    and must echo the ticket, customer and amount the interrupt showed."""
 
     def audited_approval_gate(
         state: AtlasState, config: RunnableConfig, runtime: Runtime
