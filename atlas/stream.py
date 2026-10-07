@@ -6,8 +6,9 @@ See "Building the multiplexed stream". `stream_atlas` wraps a compiled graph
 `graph.stream(..., stream_mode=["updates", "messages", "custom"],
 subgraphs=True, version="v2")` - the production default from "The stream_mode
 taxonomy". Research and the Deep Research Agent are their own graphs
-(Chapters 17-18); pass one as `graph=` and its workers and sub-agents arrive
-on the same loop with non-empty namespaces.
+(Chapters 17-18); pass one as `graph=` and it streams on the same loop.
+Streamed directly, `research_graph`'s workers are plain nodes at `ns=()`; the
+Deep Research Agent's sub-agents each arrive under their own `("tools:<id>",)`.
 
 `version="v2"` is passed explicitly on purpose - `graph.stream()`'s own
 default is still the older `v1`, whose chunk shape changes with the
