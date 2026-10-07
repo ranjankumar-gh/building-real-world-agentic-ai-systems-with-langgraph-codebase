@@ -327,3 +327,28 @@ def test_run_research_defaults_max_concurrency_to_eight():
     result = run_research(["docs.internal/refund-policy"])
 
     assert result["findings"][0]["source"] == "docs.internal/refund-policy"
+
+
+def test_the_chapter_10_inputs_run_end_to_end_through_the_refund(monkeypatch):
+    """Chapter 10's `inputs`, through the real compiled graph: the ticket
+    arrives in the caller's input, triage routes "I need a refund." to the
+    refund route (classifier patched, no model call), the gate suspends,
+    and an approve charges the seeded T-1001 refund once."""
+    from langgraph.types import Command
+
+    from atlas import run as run_module
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("refund")
+    )
+    config = {"configurable": {"thread_id": "test-thread-ch10-inputs"}}
+
+    first = graph_module.graph.invoke(run_module.inputs, config)
+    assert first["__interrupt__"][0].value["ticket_id"] == "T-1001"
+    result = graph_module.graph.invoke(
+        Command(resume={"type": "approve", "by": "lead@example.com"}), config
+    )
+
+    assert result["refund_done"] is True
+    assert result["messages"][-1].content == "Refund of $49.00 issued for T-1001."
+    assert result["approval"]["by"] == "lead@example.com"

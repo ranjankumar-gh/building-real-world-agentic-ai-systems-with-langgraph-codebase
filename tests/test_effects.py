@@ -42,7 +42,7 @@ def test_charge_refund_charges_once_and_updates_the_seeded_ledger():
     effects._REFUNDS["T-idem-1"] = {"status": "pending", "amount": 10.0}
     key = idempotency_key("thread-charge-once", "T-idem-1")
 
-    result = charge_refund(key, "T-idem-1")
+    result = charge_refund(key, "T-idem-1", 10.0)
 
     assert result == "Refund of $10.00 issued for T-idem-1."
     assert effects._REFUNDS["T-idem-1"]["status"] == "refunded"
@@ -58,10 +58,12 @@ def test_charge_refund_is_idempotent_a_repeated_key_does_not_charge_again():
     effects._REFUNDS["T-idem-2"] = {"status": "pending", "amount": 25.0}
     key = idempotency_key("thread-charge-twice", "T-idem-2")
 
-    first = charge_refund(key, "T-idem-2")
-    # Mutate the seeded record directly to prove a repeat does not re-read it.
+    first = charge_refund(key, "T-idem-2", 25.0)
+    # Mutate the seeded record directly to prove a repeat does not re-read it,
+    # and ask for a different amount: the key alone decides, so the first
+    # result comes back and nothing is charged (not even the refused amount).
     effects._REFUNDS["T-idem-2"]["amount"] = 999.0
-    second = charge_refund(key, "T-idem-2")
+    second = charge_refund(key, "T-idem-2", 5000.0)
 
     assert first == second == "Refund of $25.00 issued for T-idem-2."
 
@@ -73,7 +75,7 @@ def test_charge_refund_with_a_different_key_charges_independently():
     key_a = idempotency_key("thread-a", "T-idem-3")
     key_b = idempotency_key("thread-b", "T-idem-3")
 
-    result_a = charge_refund(key_a, "T-idem-3")
+    result_a = charge_refund(key_a, "T-idem-3", 5.0)
 
     # The provider already marked the ticket refunded under key_a; a
     # DIFFERENT logical key (different thread) is not deduped against it and
@@ -81,6 +83,38 @@ def test_charge_refund_with_a_different_key_charges_independently():
     # does not model per-ticket exclusivity, only per-key dedup.
     assert key_a != key_b
     assert result_a == "Refund of $5.00 issued for T-idem-3."
+
+
+def test_charge_refund_charges_the_amount_it_is_given_not_the_original():
+    """Chapter 11's edit, at the backend: an approver corrects a $2,400
+    refund to $240, the refund node passes the amount from state, and $240
+    is what gets charged."""
+    from atlas import effects
+
+    effects._REFUNDS["T-idem-4"] = {"status": "pending", "amount": 2400.0}
+    key = idempotency_key("thread-edited-amount", "T-idem-4")
+
+    result = charge_refund(key, "T-idem-4", 240.0)
+
+    assert result == "Refund of $240.00 issued for T-idem-4."
+    assert effects._REFUNDS["T-idem-4"]["status"] == "refunded"
+
+
+def test_charge_refund_refuses_more_than_the_original_and_records_nothing():
+    """The provider's cap: an amount above the original charge raises
+    RefundError (the type the refund node's retry_on names, so the refusal
+    lands on Chapter 10's error_handler path) and leaves no ledger entry
+    and no refunded record behind."""
+    from atlas import effects
+
+    effects._REFUNDS["T-idem-5"] = {"status": "pending", "amount": 49.0}
+    key = idempotency_key("thread-over-cap", "T-idem-5")
+
+    with pytest.raises(RefundError, match="exceeds the original"):
+        charge_refund(key, "T-idem-5", 4900.0)
+
+    assert key not in effects._LEDGER
+    assert effects._REFUNDS["T-idem-5"]["status"] == "pending"
 
 
 def test_refund_error_is_a_plain_runtime_error_the_retry_policy_can_target():

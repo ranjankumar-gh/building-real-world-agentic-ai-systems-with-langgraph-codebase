@@ -623,18 +623,18 @@ def test_refund_computes_a_stable_key_and_returns_a_message_plus_refund_done(
     membrane was crossed."""
     seen_keys = []
 
-    def _fake_charge(key, ticket_id):
-        seen_keys.append((key, ticket_id))
+    def _fake_charge(key, ticket_id, amount):
+        seen_keys.append((key, ticket_id, amount))
         return f"Refund issued for {ticket_id}."
 
     monkeypatch.setattr(graph_module, "charge_refund", _fake_charge)
 
-    state = _state(ticket={"id": "T-1001"})
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
     config = {"configurable": {"thread_id": "thread-refund-1"}}
 
     delta = refund(state, config)
 
-    assert seen_keys == [("refund:thread-refund-1:T-1001", "T-1001")]
+    assert seen_keys == [("refund:thread-refund-1:T-1001", "T-1001", 49.0)]
     assert delta["refund_done"] is True
     assert isinstance(delta["messages"][0], AIMessage)
     assert delta["messages"][0].content == "Refund issued for T-1001."
@@ -651,10 +651,10 @@ def test_refund_recomputes_the_same_key_across_two_calls_on_the_same_thread_and_
     monkeypatch.setattr(
         graph_module,
         "charge_refund",
-        lambda key, ticket_id: seen_keys.append(key) or "ok",
+        lambda key, ticket_id, amount: seen_keys.append(key) or "ok",
     )
 
-    state = _state(ticket={"id": "T-1001"})
+    state = _state(ticket={"id": "T-1001", "amount": 49.0})
     config = {"configurable": {"thread_id": "thread-refund-resume"}}
 
     refund(state, config)
@@ -726,7 +726,7 @@ def test_a_refund_that_keeps_failing_exhausts_retries_then_escalates_end_to_end(
     monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("refund"))
     attempts = []
 
-    def _always_fails(key, ticket_id):
+    def _always_fails(key, ticket_id, amount):
         attempts.append(key)
         raise RefundError("payment backend rejected the refund")
 
@@ -771,7 +771,8 @@ def test_approval_gate_surfaces_the_proposed_refund_and_approves_to_refund(
     ]
     assert isinstance(result, Command)
     assert result.goto == "refund"
-    assert result.update is None
+    assert set(result.update) == {"approval"}
+    assert result.update["approval"]["decision"] == "approve"
 
 
 def test_approval_gate_rejects_and_routes_to_escalate_with_the_reason_recorded(
@@ -787,7 +788,8 @@ def test_approval_gate_rejects_and_routes_to_escalate_with_the_reason_recorded(
     result = approval_gate(state)
 
     assert result.goto == "escalate"
-    assert result.update == {"error": "refund rejected: duplicate refund request"}
+    assert result.update["error"] == "refund rejected: duplicate refund request"
+    assert result.update["approval"]["decision"] == "reject"
 
 
 def test_approval_gate_accepts_an_edit_within_policy_and_updates_the_ticket_amount(
@@ -804,7 +806,8 @@ def test_approval_gate_accepts_an_edit_within_policy_and_updates_the_ticket_amou
     result = approval_gate(state)
 
     assert result.goto == "refund"
-    assert result.update == {"ticket": {"id": "T-1001", "amount": 24.0}}
+    assert result.update["ticket"] == {"id": "T-1001", "amount": 24.0}
+    assert result.update["approval"]["decision"] == "edit"
 
 
 def test_approval_gate_rejects_an_out_of_policy_edit_and_escalates_instead(
@@ -821,7 +824,8 @@ def test_approval_gate_rejects_an_out_of_policy_edit_and_escalates_instead(
     result = approval_gate(state)
 
     assert result.goto == "escalate"
-    assert result.update == {"error": "edited amount 4900.0 out of policy"}
+    assert result.update["error"] == "edited amount 4900.0 out of policy"
+    assert result.update["approval"]["decision"] == "edit"
 
 
 def test_approval_gate_raises_on_an_unrecognized_decision_type(monkeypatch):
@@ -896,6 +900,132 @@ def test_resuming_with_an_edit_re_validates_before_crossing_the_membrane(
     assert result.get("refund_done") is not True
     assert result["ticket"] == {"status": "escalated"}
     assert result["error"] == "edited amount 4900.0 out of policy"
+
+
+def _suspend_refund(monkeypatch, thread_id: str, ticket: dict) -> dict:
+    """Drive the real compiled graph to the approval gate for `ticket`."""
+    monkeypatch.setattr(graph_module, "classify", lambda messages: _decision("refund"))
+    config = {"configurable": {"thread_id": thread_id}}
+    graph.invoke(
+        {"messages": [{"role": "user", "content": "refund please"}], "ticket": ticket},
+        config,
+    )
+    return config
+
+
+def test_an_approved_edit_charges_the_edited_amount_end_to_end(monkeypatch):
+    """Chapter 11's edit, honored at the membrane: a $2,400 refund corrected
+    to $240 at the gate charges $240 at the real seeded backend - the
+    refund node reads the amount from state, after the edit."""
+    from atlas import effects
+
+    effects._REFUNDS["T-2400"] = {"status": "pending", "amount": 2400.0}
+    config = _suspend_refund(
+        monkeypatch, "test-thread-edit-240", {"id": "T-2400", "amount": 2400.0}
+    )
+
+    result = graph.invoke(
+        Command(resume={"type": "edit", "amount": 240.0, "by": "lead@example.com"}),
+        config,
+    )
+
+    assert result["refund_done"] is True
+    assert result["messages"][-1].content == "Refund of $240.00 issued for T-2400."
+    assert result["ticket"]["amount"] == 240.0
+
+
+def test_a_resume_with_the_same_key_still_charges_once(monkeypatch):
+    """The idempotency key is unchanged by the amount: re-running the refund
+    step on the same thread (what a crash-and-resume does) recomputes the
+    same key, and the backend hands back the first result instead of
+    charging again."""
+    from atlas import effects
+
+    effects._REFUNDS["T-2401"] = {"status": "pending", "amount": 2400.0}
+    config = _suspend_refund(
+        monkeypatch, "test-thread-edit-resume", {"id": "T-2401", "amount": 2400.0}
+    )
+    graph.invoke(Command(resume={"type": "edit", "amount": 240.0}), config)
+    charged = dict(effects._LEDGER)
+
+    # Re-run the refund node against the checkpointed state, same thread.
+    again = refund(graph.get_state(config).values, config)
+
+    assert again["messages"][0].content == "Refund of $240.00 issued for T-2401."
+    assert effects._LEDGER == charged  # no second entry, no second charge
+
+
+def test_an_amount_above_the_original_is_refused_and_escalates_end_to_end(
+    monkeypatch,
+):
+    """The backend's cap, end to end: the ticket asks for more than the
+    original charge, the gate's own check (against the ticket) passes it,
+    and the real charge_refund refuses with RefundError - retried by the
+    refund node's policy, then compensated by refund_failed."""
+    from atlas import effects
+
+    effects._REFUNDS["T-0049"] = {"status": "pending", "amount": 49.0}
+    attempts = []
+    real_charge = effects.charge_refund
+
+    def _counting(key, ticket_id, amount):
+        attempts.append(amount)
+        return real_charge(key, ticket_id, amount)
+
+    monkeypatch.setattr(graph_module, "charge_refund", _counting)
+    config = _suspend_refund(
+        monkeypatch, "test-thread-over-cap", {"id": "T-0049", "amount": 4900.0}
+    )
+
+    result = graph.invoke(Command(resume={"type": "approve"}), config)
+
+    assert attempts == [4900.0, 4900.0, 4900.0]
+    assert result.get("refund_done") is not True
+    assert result["ticket"] == {"status": "escalated"}
+    assert result["error"] == "refund failed; needs manual review"
+    assert effects._REFUNDS["T-0049"]["status"] == "pending"
+
+
+def test_an_approved_refund_carries_the_approval_record_in_its_final_state(
+    monkeypatch,
+):
+    """Chapter 1's "every refund traceable to an approval": the gate writes
+    who decided, what, and when to the `approval` channel, and the finished
+    run's state still carries it after the refund."""
+    from datetime import datetime
+
+    config = _suspend_refund(
+        monkeypatch, "test-thread-approval-record", {"id": "T-1001", "amount": 49.0}
+    )
+
+    result = graph.invoke(
+        Command(resume={"type": "approve", "by": "lead@example.com"}), config
+    )
+
+    assert result["refund_done"] is True
+    record = result["approval"]
+    assert record["decision"] == "approve"
+    assert record["by"] == "lead@example.com"
+    assert datetime.fromisoformat(record["at"]).tzinfo is not None
+
+
+def test_a_rejected_refund_records_the_decision_too(monkeypatch):
+    """A reject is a decision as well: it is recorded, and `escalate`
+    overwriting `ticket` does not erase it, because `approval` is a channel
+    of its own."""
+    config = _suspend_refund(
+        monkeypatch, "test-thread-reject-record", {"id": "T-1001", "amount": 49.0}
+    )
+
+    result = graph.invoke(
+        Command(resume={"type": "reject", "reason": "dup", "by": "lead@example.com"}),
+        config,
+    )
+
+    assert result.get("refund_done") is not True
+    assert result["ticket"] == {"status": "escalated"}
+    assert result["approval"]["decision"] == "reject"
+    assert result["approval"]["by"] == "lead@example.com"
 
 
 def test_timeout_policy_is_accepted_on_an_async_node():

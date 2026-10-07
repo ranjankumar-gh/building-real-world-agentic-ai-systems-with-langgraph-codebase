@@ -85,7 +85,9 @@ the only node that decides whether `refund` ever runs. It calls
 `interrupt()` with the proposed action, which suspends the run to the
 checkpointer, and resumes with the human's decision as the return value of
 that same call. Approve and a re-validated edit route onward to `refund`
-via `Command(goto=...)`; reject routes to `escalate`. Because a resumed node
+via `Command(goto=...)`; reject routes to `escalate`. Each routed decision
+writes the `approval` audit record (decision, decider, timestamp), and an
+edit's amount replaces the ticket's, which `refund` then charges. Because a resumed node
 re-runs from the top (see the chapter's "gotcha" callout), `approval_gate`
 does nothing but interrupt and route - no side effect lives here, the same
 membrane discipline Chapter 10 established for `refund` itself.
@@ -126,6 +128,7 @@ chapter's tests continue to depend on unchanged."""
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 from langchain_core.messages import AIMessage
@@ -278,7 +281,9 @@ def approval_gate(state: AtlasState) -> Command[Literal["refund", "escalate"]]:
     to `escalate`. This node does nothing else - on resume, LangGraph
     re-runs it from the top, so any side effect placed before `interrupt()`
     would fire again on every resume. See "A resumed node re-runs from the
-    top"."""
+    top". Every routed decision also writes `approval` (decision, `by`,
+    timestamp) - computed after `interrupt()` returns, so only the resumed
+    run records it, and the refund's checkpoint carries it."""
     ticket = state["ticket"]
     decision = interrupt(
         {
@@ -287,22 +292,33 @@ def approval_gate(state: AtlasState) -> Command[Literal["refund", "escalate"]]:
             "amount": ticket["amount"],
         }
     )
+    record = {  # the audit record: who decided what, and when
+        "decision": decision["type"],
+        "by": decision.get("by"),
+        "at": datetime.now(UTC).isoformat(),
+    }
     if decision["type"] == "approve":
-        return Command(goto="refund")
+        return Command(update={"approval": record}, goto="refund")
     if decision["type"] == "edit":
         amount = decision["amount"]
         if not 0 < amount <= ticket["amount"]:  # re-validate the human's edit
             return Command(
-                update={"error": f"edited amount {amount} out of policy"},
+                update={
+                    "approval": record,
+                    "error": f"edited amount {amount} out of policy",
+                },
                 goto="escalate",
             )
         return Command(
-            update={"ticket": {**ticket, "amount": amount}},
+            update={"approval": record, "ticket": {**ticket, "amount": amount}},
             goto="refund",
         )
     if decision["type"] == "reject":
         return Command(
-            update={"error": f"refund rejected: {decision.get('reason', '')}"},
+            update={
+                "approval": record,
+                "error": f"refund rejected: {decision.get('reason', '')}",
+            },
             goto="escalate",
         )
     raise ValueError(f"unknown decision: {decision['type']}")
@@ -312,11 +328,13 @@ def refund(state: AtlasState, config: RunnableConfig) -> dict:
     """Atlas's first crossing of the checkpoint membrane. The idempotency
     key is derived from durable state (`thread_id` + `ticket_id`), so a
     retry or a resume recomputes the SAME key and `charge_refund` dedupes at
-    the backend instead of charging twice."""
+    the backend instead of charging twice. The amount comes from state, so
+    an approver's edit at the Chapter 11 gate is what gets charged."""
     ticket_id = state["ticket"]["id"]
+    amount = state["ticket"]["amount"]  # read from state, not the backend
     thread_id = config["configurable"]["thread_id"]
     key = idempotency_key(thread_id, ticket_id)
-    result = charge_refund(key, ticket_id)  # safe to re-run: keyed
+    result = charge_refund(key, ticket_id, amount)  # safe to re-run: keyed
     return {"messages": [AIMessage(result)], "refund_done": True}
 
 

@@ -111,3 +111,10 @@ def test_retrieved_channel_merges_parallel_fan_out_without_duplicates():
 
     assert {doc["id"] for doc in result["retrieved"]} == {"1", "2", "3"}
     assert len(result["retrieved"]) == 3
+
+
+def test_atlas_state_declares_the_chapter_11_approval_record_channel():
+    """Chapter 11: the gate's audit record needs a declared channel - a
+    write to an undeclared key is dropped (Chapter 6)."""
+    assert "approval" in AtlasState.__annotations__
+    assert get_origin(AtlasState.__annotations__["approval"]) is not Annotated

@@ -15,7 +15,10 @@ the checkpoint membrane, `async` for a read-only one, `exit` dev-only) - and
 `run_with_drain`, the graceful-drain shape for deploys: pass a `RunControl`,
 call `.request_drain()` from a shutdown handler (any thread), and the run
 stops at the next superstep boundary with a resumable checkpoint instead of
-losing an in-flight conversation to a hard kill.
+losing an in-flight conversation to a hard kill. `inputs` is the shape of a
+refund request: Atlas does not look tickets up, so the support system that
+opened the ticket passes it in beside the customer's message, and the
+`refund` node reads `id` and `amount` from it.
 
 Chapter 11, "Human-in-the-Loop", adds `run_to_approval` and
 `resume_approval` - "Suspend, surface, resume": driving Atlas's "refund"
@@ -67,6 +70,14 @@ def inspect(thread_id: str) -> StateSnapshot:
     made visible: a new process, same thread_id, picks up from here."""
     config = {"configurable": {"thread_id": thread_id}}
     return graph.get_state(config)
+
+
+# A refund request as the support system sends it: the customer's message
+# plus the ticket it is about. The id and amount match the seeded backend.
+inputs = {
+    "messages": [{"role": "user", "content": "I need a refund."}],
+    "ticket": {"id": "T-1001", "amount": 49.0},
+}
 
 
 def run_with_durability(
@@ -124,7 +135,8 @@ def resume_approval(thread_id: str, decision: dict) -> dict:
     """Resume a suspended approval gate on the SAME thread - no new input,
     just the human's decision. `decision` becomes the return value of the
     `interrupt()` call inside `approval_gate`, hours or a restart later, on
-    any worker."""
+    any worker. Put the decider in it (`{"type": "approve", "by": ...}`):
+    the gate copies `by` into the `approval` audit record."""
     config = {"configurable": {"thread_id": thread_id}}
     return graph.invoke(Command(resume=decision), config)
 

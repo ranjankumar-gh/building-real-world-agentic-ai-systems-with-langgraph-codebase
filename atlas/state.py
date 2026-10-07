@@ -28,6 +28,13 @@ when that old checkpoint resumes. Read it with `state.get("refund_done",
 False)`, never `state["refund_done"]`, so pre-Chapter-10 checkpoints keep
 resuming safely (see "State migration without downtime").
 
+Chapter 11, "Human-in-the-Loop", adds `approval` - the audit record the
+approval gate writes on every decision it routes: the decision type, who
+made it (`by`, carried in the resume value), and a UTC timestamp. It is a
+channel of its own, so `escalate` overwriting `ticket` does not erase it, and
+the checkpoint after the gate - the one the refund resumes from - carries it.
+Additive like `refund_done`: read it with `state.get("approval")`.
+
 Chapter 12, "Context Engineering", is the first reader of `Doc.score`
 (declared in Chapter 5, set by the retriever): `atlas/context.py`'s
 `select_docs` ranks retrieved documents on it and caps them to the retrieved
@@ -68,5 +75,6 @@ class AtlasState(TypedDict):
     ticket: dict | None  # one writer per step, guarded (LastValue)
     route: str  # one writer per step, guarded (LastValue)
     retrieve_attempts: int  # the loop guard; triage resets it, retrieve counts
-    error: str | None  # a tool failure; triage clears it, retrieve records it
+    error: str | None  # why the run escalated; triage clears it
     refund_done: bool  # NEW this chapter - additive, read with a default
+    approval: dict | None  # Chapter 11: who decided the refund, and when
