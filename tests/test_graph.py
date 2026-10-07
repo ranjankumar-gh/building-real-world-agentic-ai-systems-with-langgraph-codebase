@@ -1011,7 +1011,12 @@ def test_approval_gate_surfaces_the_proposed_refund_and_approves_to_refund(
     result = approval_gate(state)
 
     assert seen_payloads == [
-        {"action": "issue_refund", "ticket_id": "T-1001", "amount": 49.0}
+        {
+            "action": "issue_refund",
+            "ticket_id": "T-1001",
+            "customer_id": None,  # the ticket names no customer
+            "amount": 49.0,
+        }
     ]
     assert isinstance(result, Command)
     assert result.goto == "refund"
@@ -1125,6 +1130,7 @@ def test_the_refund_route_suspends_at_the_approval_gate_end_to_end(monkeypatch):
     assert result["__interrupt__"][0].value == {
         "action": "issue_refund",
         "ticket_id": "T-1001",
+        "customer_id": None,
         "amount": 49.0,
     }
 

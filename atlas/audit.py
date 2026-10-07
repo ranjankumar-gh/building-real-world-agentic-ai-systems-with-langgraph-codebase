@@ -19,8 +19,11 @@ Two writers share one namespace, `audit_ns(customer_id)`:
   "approval": decision, approver, time, the ticket id, customer and amount
   the approver confirmed, what they were shown, or the refusal) and every
   outcome of the refund node, which checks again before it charges (event
-  "refund": charged, refused, provider refused, failed). Append-only: every
-  write has its own key. The refund is a graph node, not a tool,
+  "refund": charged, replayed, refused, provider refused, failed).
+  Append-only: every write has its own key. The approval row is also the
+  refund's authority: the gate puts its key in `state["approval"]`, and
+  `refund` charges only against that row, once. The refund is a graph node,
+  not a tool,
   so `AuditGate` never sees it; and Chapter 11's `approval` record lives in
   graph state, which is a checkpoint, and checkpoints are the first thing
   an erasure deletes (`atlas/erasure.py`). So `atlas/graph.py`'s
@@ -125,3 +128,34 @@ def record_approval(
         },
     )
     return key
+
+
+def approval_on_record(
+    store: BaseStore, customer_id: str | None, key: str | None
+) -> dict[str, Any] | None:
+    """The approval row the gate wrote under `key`, or None.
+
+    `refund` authorizes from this row, not from `state["approval"]`: state
+    is caller-writable, and the audit namespace is not (no caller reaches
+    the store except through `atlas/auth.py`'s store handler, which refuses
+    every "audit" namespace). A key that names no row, or a row that is not
+    an approval, authorizes nothing."""
+    if not key:
+        return None
+    item = store.get(audit_ns(customer_id or "unknown"), key)
+    if item is None or item.value.get("event") != "approval":
+        return None
+    return item.value
+
+
+def charged_rows(
+    store: BaseStore, customer_id: str | None, **match: Any
+) -> list[dict[str, Any]]:
+    """The "charged" refund rows in a customer's namespace matching `match`
+    (exact field values, e.g. approval_key=..., or thread=..., ticket=...)."""
+    found = store.search(
+        audit_ns(customer_id or "unknown"),
+        filter={"event": "refund", "outcome": "charged", **match},
+        limit=10,
+    )
+    return [item.value for item in found]

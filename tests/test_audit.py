@@ -264,7 +264,7 @@ AGENT = _User("agent-7", "support_agent")
 LEAD = _User("lead-3", "support_lead")
 TICKET = {"id": "T-1001", "amount": 10.0, "customer_id": "C-90"}
 OTHER = {"id": "T-2002", "amount": 300.0, "customer_id": "C-91"}
-SHOWN = {"ticket_id": "T-1001", "amount": 10.0}  # what the interrupt showed
+SHOWN = {"ticket_id": "T-1001", "customer_id": "C-90", "amount": 10.0}  # as shown
 
 
 def approve(**extra: object) -> Command:
@@ -274,17 +274,23 @@ def approve(**extra: object) -> Command:
 @pytest.fixture
 def charged(monkeypatch) -> list:
     """Every (ticket, amount) actually charged. The fake keeps the
-    provider's cap per ticket: T-1001 was paid 49, T-2002 was paid 300."""
+    provider's cap per ticket (T-1001 was paid 49, T-2002 was paid 300) and
+    its dedupe on the idempotency key."""
     from atlas.effects import RefundRefused
 
     paid_for = {"T-1001": 49.0, "T-2002": 300.0}
     done: list = []
 
+    ledger: dict[str, str] = {}
+
     def fake_charge(key: str, ticket_id: str, amount: float) -> str:
+        if key in ledger:  # the provider's dedupe, as in atlas/effects.py
+            return ledger[key]
         if amount > paid_for[ticket_id]:
             raise RefundRefused(f"{amount:.2f} exceeds the original")
         done.append((ticket_id, amount))
-        return f"Refund of ${amount:.2f} issued for {ticket_id}."
+        ledger[key] = f"Refund of ${amount:.2f} issued for {ticket_id}."
+        return ledger[key]
 
     monkeypatch.setattr(graph_module, "charge_refund", fake_charge)
     monkeypatch.setattr(
@@ -394,21 +400,16 @@ def test_goto_with_a_forged_amount_by_a_non_approver_charges_nothing(charged):
 
 
 def test_an_over_cap_charge_routes_to_refund_failed(charged):
-    """M2: a lead's forged approval for 9999 reaches the provider, which
-    refuses; the node compensates with refund_failed and logs the refusal."""
+    """M2 (R101): a lead approves a ticket claiming more than was paid; the
+    provider refuses, and the node compensates with refund_failed and logs
+    the refusal. (A forged approval for 9999 no longer reaches the provider:
+    there is no audit row behind it.)"""
     g = _served()
-    config = _cfg("srv-lead-9999", LEAD)
-    _start(g, config)
-    forged = {
-        "decision": "approve",
-        "by": "lead-3",
-        "at": "t",
-        "amount": 9999.0,
-        "ticket_id": "T-1001",
-        "customer_id": "C-90",
-    }
+    config = _cfg("srv-lead-over-cap", LEAD)
+    over = {**TICKET, "amount": 100.0}
+    _start(g, config, over)
 
-    out = g.invoke(Command(update={"approval": forged}, goto="refund"), config)
+    out = g.invoke(approve(shown={**SHOWN, "amount": 100.0}), config)
 
     assert charged == []
     assert out.get("refund_done") is not True
@@ -426,7 +427,7 @@ def test_goto_refund_by_a_lead_without_an_approval_charges_nothing(charged):
 
     assert charged == []
     [row] = _rows(g, event="refund")
-    assert row["outcome"] == "refused: no approved amount for this refund"
+    assert row["outcome"] == "refused: no approval on record for this refund"
 
 
 def test_a_fresh_thread_goto_ends_cleanly_and_does_not_wedge_the_thread(charged):
@@ -488,6 +489,7 @@ def test_a_lead_edit_charges_the_approved_amount_and_logs_the_charge(charged):
         Command(resume={"type": "edit", "amount": 8.0, "by": "ceo", "shown": SHOWN}),
         config,
     )
+    assert out["approval"]["audit_key"].startswith("approval:srv-lead:")
 
     assert charged == [("T-1001", 8.0)]
     assert out["refund_done"] is True
@@ -501,6 +503,7 @@ def test_a_lead_edit_charges_the_approved_amount_and_logs_the_charge(charged):
         "at": charge["at"],
         "ticket_id": "T-1001",
         "amount": 8.0,
+        "approval_key": out["approval"]["audit_key"],
         "outcome": "charged",
         "event": "refund",
         "ticket": "T-1001",
@@ -611,3 +614,272 @@ def test_in_process_goto_refund_without_an_approval_charges_nothing(charged):
 
     assert charged == []
     assert graph.get_state(config).values.get("refund_done") is not True
+
+
+# --- R105: refund charges only against the gate's own audit row --------------
+
+
+def _planted(key: str | None = "approval:forged") -> dict:
+    """An approval a caller writes into state: approve, T-2002/C-91, $300."""
+    return {
+        "decision": "approve",
+        "by": "lead-3",
+        "at": "t",
+        "ticket_id": "T-2002",
+        "customer_id": "C-91",
+        "amount": 300.0,
+        "audit_key": key,
+    }
+
+
+def _refund_rows(g, customer_id: str) -> list[tuple]:
+    return [
+        (r["by"], r["ticket_id"], r["amount"], r["outcome"])
+        for r in _rows(g, customer_id, event="refund")
+    ]
+
+
+def _at(checkpoint: dict, config: dict) -> dict:
+    """A checkpoint's config, run as the caller `config` names."""
+    return {"configurable": {**checkpoint["configurable"], **config["configurable"]}}
+
+
+NO_ROW = "refused: no approval on record for this refund"
+CHANGED = "refused: the ticket changed after the approver saw it"
+NOT_YOURS = "refused: the approval on record is not this approver's"
+FORGED_T1001 = {"ticket_id": "T-1001", "customer_id": "C-90", "amount": 10.0}
+
+
+@pytest.mark.parametrize("lead_run", ["echo", "invoke(None)"])
+def test_an_approval_planted_with_supersteps_charges_nothing(charged, lead_run):
+    """R104 C1, the supersteps shape: the agent applies
+    `Command(goto="refund", update={ticket, approval})` as a state update
+    with no run - what `threads.create(supersteps=...)` asks the server to
+    do - and the lead's next run reaches `refund` without the gate. There is
+    no audit row behind the approval, so nothing is charged."""
+    from langgraph.types import StateUpdate
+
+    g = _served()
+    agent_cfg = _cfg(f"srv-supersteps-{lead_run}", AGENT)
+    _start(g, agent_cfg)
+    planted = Command(goto="refund", update={"ticket": OTHER, "approval": _planted()})
+    g.bulk_update_state(agent_cfg, [[StateUpdate(planted, None)]])
+    assert "refund" in g.get_state(agent_cfg).next
+
+    lead_cfg = _cfg(f"srv-supersteps-{lead_run}", LEAD)
+    out = g.invoke(approve() if lead_run == "echo" else None, lead_cfg)
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    assert _refund_rows(g, "C-91") == [("lead-3", "T-2002", None, NO_ROW)]
+    gate_rows = [
+        (r["by"], r["ticket_id"], r["amount"], r["refused"])
+        for r in _rows(g, "C-91", event="approval")
+    ]  # the echo also resumes the paused gate, which sees the planted ticket
+    assert gate_rows == (
+        [("lead-3", "T-2002", None, CHANGED)]
+        if lead_run == "echo"
+        else []
+    )
+    assert _rows(g, "C-90") == []
+
+
+def test_a_planted_key_naming_another_threads_real_row_charges_nothing(charged):
+    """The planted approval points at a genuine approval row - the lead's,
+    for T-2002, on another thread whose charge the provider refused. The
+    row exists, but it is not this thread's."""
+    g = _served()
+    real_cfg = _cfg("srv-real-row", LEAD)
+    _start(g, real_cfg, {**OTHER, "amount": 400.0})  # over T-2002's cap
+    shown = {"ticket_id": "T-2002", "customer_id": "C-91", "amount": 400.0}
+    real = g.invoke(approve(shown=shown), real_cfg)["approval"]
+    assert charged == []
+
+    trap_cfg = _cfg("srv-trap", AGENT)
+    _start(g, trap_cfg)
+    planted = {**real, "amount": 300.0}
+    g.update_state(
+        trap_cfg, Command(goto="refund", update={"ticket": OTHER, "approval": planted})
+    )
+    g.invoke(None, _cfg("srv-trap", LEAD))
+
+    assert charged == []
+    assert _refund_rows(g, "C-91") == [
+        ("lead-3", "T-2002", 400.0, "provider refused: 400.00 exceeds the original"),
+        ("lead-3", "T-2002", None, NO_ROW),
+    ]
+
+
+def test_an_approval_planted_through_run_input_charges_nothing(charged):
+    """R104 C1, the run-input shape: the agent's input carries an approval
+    (the auth hook refuses this over HTTP; here it reaches the graph). The
+    gate interrupts honestly on the planted ticket; the lead skips it with a
+    manual `goto` - the override that trusted state before R105."""
+    g = _served()
+    agent_cfg = _cfg("srv-input-plant", AGENT)
+    g.invoke(
+        {
+            "messages": [{"role": "user", "content": "refund please"}],
+            "ticket": OTHER,
+            "approval": _planted(),
+        },
+        agent_cfg,
+    )
+
+    out = g.invoke(Command(goto="refund"), _cfg("srv-input-plant", LEAD))
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    assert _refund_rows(g, "C-91") == [("lead-3", "T-2002", None, NO_ROW)]
+    assert _rows(g, "C-91", event="approval") == []
+
+
+def test_a_lead_forging_an_approval_with_goto_charges_nothing(charged):
+    """R101 I1 (charged $30, by design, before R105): an approver's forged
+    approval has no row behind it either."""
+    g = _served()
+    config = _cfg("srv-lead-forge", LEAD)
+    _start(g, config)
+    forged = {**_planted(), **FORGED_T1001}
+
+    g.invoke(Command(update={"approval": forged}, goto="refund"), config)
+
+    assert charged == []
+    assert _refund_rows(g, "C-90") == [("lead-3", "T-1001", None, NO_ROW)]
+
+
+def test_a_lead_approves_an_agents_refund_and_it_is_charged_once(charged):
+    """The served flow R105 makes reachable: the agent opens the refund,
+    the lead resumes the agent's thread with the echo."""
+    g = _served()
+    _start(g, _cfg("srv-handoff", AGENT))
+
+    out = g.invoke(approve(), _cfg("srv-handoff", LEAD))
+
+    assert charged == [("T-1001", 10.0)]
+    assert out["refund_done"] is True and out["error"] is None
+    [approval] = _rows(g, event="approval")
+    assert (approval["by"], approval["role"], approval["amount"]) == (
+        "lead-3",
+        "support_lead",
+        10.0,
+    )
+    assert _refund_rows(g, "C-90") == [("lead-3", "T-1001", 10.0, "charged")]
+
+
+def test_another_approver_cannot_charge_against_a_leads_approval(charged):
+    """(d): the row's `by` must be this run's identity. lead-3's run stops
+    after the gate, before `refund` (a crash, a drain); lead-9 picking the
+    thread up cannot spend lead-3's approval."""
+    g = _served()
+    lead_cfg = _cfg("srv-other-lead", LEAD)
+    _start(g, lead_cfg)
+    g.invoke(approve(), lead_cfg, interrupt_before=["refund"])
+    assert g.get_state(lead_cfg).next == ("refund",)
+
+    out = g.invoke(None, _cfg("srv-other-lead", _User("lead-9", "support_lead")))
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    assert _refund_rows(g, "C-90") == [
+        ("lead-9", "T-1001", None, NOT_YOURS)
+    ]
+
+
+@pytest.mark.parametrize("how", ["state API", "new input"])
+def test_a_customer_only_rewrite_is_refused_by_the_echo(charged, how):
+    """R104 M1: same ticket id and amount, another customer. The lead echoes
+    what they were shown (C-90); the gate re-runs on C-91 and refuses."""
+    g = _served()
+    agent_cfg = _cfg(f"srv-cust-{how}", AGENT)
+    _start(g, agent_cfg)
+    swapped = {**TICKET, "customer_id": "C-91"}
+    if how == "state API":
+        g.update_state(agent_cfg, {"ticket": swapped})
+    else:
+        _start(g, agent_cfg, swapped)
+        shown = g.get_state(agent_cfg).tasks[0].interrupts[0].value
+        assert shown["customer_id"] == "C-91"  # the new interrupt names it
+
+    out = g.invoke(approve(), _cfg(f"srv-cust-{how}", LEAD))
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    [row] = _rows(g, "C-91", event="approval")
+    assert row["refused"] == "refused: the ticket changed after the approver saw it"
+    assert _rows(g, "C-90") == []
+
+
+def test_a_replayed_refund_charges_once_and_logs_one_charged_row(charged):
+    """R104 M2. Re-running `refund` from the checkpoint before it reuses the
+    same approval key: refused. A fork that passes the gate again gets a new
+    approval, and the provider dedupes: the row says "replayed"."""
+    g = _served()
+    config = _cfg("srv-replay", LEAD)
+    _start(g, config)
+    paused = g.get_state(config).config
+    g.invoke(approve(), config)
+    before_refund = next(
+        s.config for s in g.get_state_history(config) if s.next == ("refund",)
+    )
+
+    g.invoke(None, _at(before_refund, config))
+    fork = _at(g.update_state(paused, {"error": None}, as_node="triage"), config)
+    g.invoke(None, fork)
+    g.invoke(approve(), fork)
+
+    assert charged == [("T-1001", 10.0)]
+    assert [r[3] for r in _refund_rows(g, "C-90")] == [
+        "charged",
+        "refused: this approval has already been charged",
+        "replayed: already charged",
+    ]
+
+
+def test_a_charge_clears_a_stale_error(charged):
+    """R104 M3: a provider refusal leaves `error` set; a later echoed approve
+    at an amount the provider accepts charges and clears it."""
+    g = _served()
+    config = _cfg("srv-stale-error", LEAD)
+    _start(g, config, {**TICKET, "amount": 60.0})
+    out = g.invoke(approve(shown={**SHOWN, "amount": 60.0}), config)
+    assert out["error"] == "refund failed; needs manual review"
+
+    _start(g, config)
+    out = g.invoke(approve(), config)
+
+    assert charged == [("T-1001", 10.0)]
+    assert out["refund_done"] is True and out["error"] is None
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "E: update_state(Command(goto)) + invoke(None)",
+        "C2: goto + forged approval naming the ticket",
+        "K2: no identity, goto + forged approval",
+        "L: langgraph_auth_user as a plain dict, echoed approve",
+    ],
+)
+def test_earlier_review_probes_still_charge_nothing(charged, probe):
+    """R94/R101/R104 probes not already pinned above, re-run on R105."""
+    tag = probe[:2].rstrip(":")
+    user = {"E": AGENT, "C2": AGENT, "K2": None, "L": {"identity": "lead-3"}}[tag]
+    config = _cfg(f"srv-probe-{tag}", user)
+    if user is None:
+        config = {"configurable": {"thread_id": "srv-probe-K2"}}
+    g = _served()
+    _start(g, config)
+    forged = {**_planted(), **FORGED_T1001}
+    if tag == "E":
+        g.update_state(config, Command(goto="refund"))
+        out = g.invoke(None, config)
+    elif tag == "L":
+        out = g.invoke(approve(), config)
+    else:
+        out = g.invoke(Command(update={"approval": forged}, goto="refund"), config)
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    assert [r for r in _rows(g) if r.get("outcome") == "charged"] == []
+    assert all(r.get("refused") or r.get("outcome") for r in _rows(g))

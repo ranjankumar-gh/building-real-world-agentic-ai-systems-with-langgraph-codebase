@@ -122,6 +122,22 @@ def _steers_the_graph(ctx: Auth.types.AuthContext, value: Any) -> bool:
     )
 
 
+GRAPH_OWNED_KEYS = frozenset({"approval", "refund_done"})  # only nodes write these
+
+
+def _plants_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
+    """A run whose input sets a key only the graph's nodes write - the gate's
+    `approval`, the refund's `refund_done`, anything named audit* - or a
+    thread created with `supersteps` (state applied with no run at all),
+    from a non-approver."""
+    run_input = (value.get("kwargs") or {}).get("input")
+    keys = set(run_input) if isinstance(run_input, dict) else set()
+    planted = keys & GRAPH_OWNED_KEYS or any(k.startswith("audit") for k in keys)
+    return bool(planted or value.get("supersteps")) and (
+        role_of(ctx.user) not in APPROVER_ROLES
+    )
+
+
 def _writes_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     """A threads "update" that is a state write, from a non-approver.
 
@@ -129,7 +145,16 @@ def _writes_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     state write as ThreadsUpdate(thread_id=...) alone, so a write that would
     touch `ticket`, `approval` or `refund_done` cannot be told from any other.
     A metadata patch carries `metadata`, a run cancel carries `action`; any
-    other update is a state write, and only an approver may make one."""
+    other update is a state write, and only an approver may make one. That
+    includes `threads.create(supersteps=...)`: the runtime authorizes the
+    thread as a "create" and then applies the supersteps as an "update" of
+    this same shape.
+
+    This test rests on the runtime's request shape, verified by probe on
+    langgraph-api 0.14.0 with langgraph-runtime-inmem 0.34.2 only. A runtime
+    that sends `metadata` (even `{}`) with a state write would get past it.
+    It is defense in depth: `refund` verifies the gate's own audit row, so a
+    state write that got through would still charge nothing."""
     return (
         ctx.action == "update"
         and "metadata" not in value
@@ -138,36 +163,53 @@ def _writes_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     )
 
 
-def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str]:
-    """Stamp a new resource with its owner, then filter every access to it."""
+def _refuse(detail: str) -> Auth.exceptions.HTTPException:
+    return Auth.exceptions.HTTPException(status_code=403, detail=detail)
+
+
+def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str] | None:
+    """Stamp a new resource with its owner, then filter every access to it.
+
+    An approver is not filtered: a support lead reads and resumes whichever
+    thread holds the refund waiting for them (role-based access). Everyone
+    else sees only what they own. Ownership is the server's to set - it
+    stamps `owner` on create - and no caller, approver or not, may change it
+    afterwards."""
     if ctx.action == "create_run" and _steers_the_graph(ctx, value):  # <1>
-        raise Auth.exceptions.HTTPException(
-            status_code=403, detail="only an approver may send goto or update"
-        )
+        raise _refuse("only an approver may send goto or update")
+    if ctx.action in ("create", "create_run") and _plants_state(ctx, value):
+        raise _refuse("only an approver may set graph-owned state")
+    if ctx.action == "update" and "owner" in (value.get("metadata") or {}):
+        raise _refuse("thread ownership is set by the server")  # <2>
     if _writes_state(ctx, value):
-        raise Auth.exceptions.HTTPException(
-            status_code=403, detail="only an approver may write thread state"
-        )
+        raise _refuse("only an approver may write thread state")
     if ctx.action in ("create", "create_run"):
         value.setdefault("metadata", {})["owner"] = ctx.user.identity
+    if role_of(ctx.user) in APPROVER_ROLES:
+        return None  # <3>
     return {"owner": ctx.user.identity}
 
 
 # 1. Defense in depth, not the control: the gate binds a decision to what
-#    the approver was shown and `refund` refuses a non-approver on its own
-#    (atlas/graph.py). The in-memory runtime passes the run's request body to
-#    this hook as value["kwargs"] (langgraph-runtime-inmem 0.34.2, checked by
-#    probe); a runtime that does not leaves `kwargs` empty, and the checks
-#    inside the graph still hold. The same goes for `_writes_state`.
+#    the approver was shown, and `refund` charges only against the gate's
+#    own audit row (atlas/graph.py). The in-memory runtime passes the run's
+#    request body to this hook as value["kwargs"] (langgraph-runtime-inmem
+#    0.34.2, checked by probe); a runtime that does not leaves `kwargs`
+#    empty, and the checks inside the graph still hold. The same goes for
+#    `_plants_state` and `_writes_state`.
+# 2. Without this, a thread owner could hand a thread to someone else by
+#    patching `metadata.owner`, and the thread would show up in their view.
+# 3. No filter at all. The owner stamp still records who opened the thread.
 
 
 @auth.on.threads
 async def threads_are_scoped_to_their_owner(
     ctx: Auth.types.AuthContext, value: Any
-) -> dict[str, str]:
+) -> dict[str, str] | None:
     """Returning a dict makes it a metadata filter: the caller only sees, and
     only touches, threads stamped with their own identity, and a thread it
     creates is stamped with that identity (the pinned SDK's own pattern).
+    An approver gets no filter (see `_owned`).
 
     This is the tenancy boundary Chapter 13's per-customer namespace draws
     inside the store, drawn again at the API. Without it, an authenticated
@@ -178,7 +220,7 @@ async def threads_are_scoped_to_their_owner(
 @auth.on.crons
 async def crons_are_scoped_to_their_owner(
     ctx: Auth.types.AuthContext, value: Any
-) -> dict[str, str]:
+) -> dict[str, str] | None:
     """Chapter 22's scheduled monitor is a cron. Without this handler the
     default deny above refuses `crons.create`; with it, a cron is owned the
     way a thread is, and its runs carry the owner's identity."""
@@ -193,3 +235,25 @@ async def assistants_are_read_only(
     assistants exist is fine; creating or mutating one from a support
     request is not, whatever role the caller holds."""
     return ctx.action in ("read", "search")
+
+
+@auth.on.store
+async def the_store_is_the_graphs(ctx: Auth.types.AuthContext, value: Any) -> bool:
+    """The HTTP store API (`client.store.*`), which the graph's own
+    `runtime.store` never passes through.
+
+    The audit log is the record `refund` charges against, so no caller may
+    read or write any namespace under "audit" - nor search from an empty
+    prefix, which would reach it. A customer's namespaces ("customer", id,
+    ...) are readable only by an identity holding `customer:<id>` (no seeded
+    token does); nothing else is open. Every refusal is a 403."""
+    namespace = tuple(value.get("namespace") or ())
+    if not namespace or namespace[0] == "audit":
+        raise _refuse("the audit log is written by the graph only")
+    permissions = getattr(ctx.user, "permissions", None) or []
+    return (
+        namespace[0] == "customer"
+        and len(namespace) > 1
+        and ctx.action in ("get", "search")
+        and f"customer:{namespace[1]}" in permissions
+    )

@@ -191,7 +191,7 @@ from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Overwrite, RetryPolicy, TimeoutPolicy, interrupt
 
-from atlas.audit import record_approval
+from atlas.audit import approval_on_record, charged_rows, record_approval
 from atlas.auth import role_of
 from atlas.context import BUDGET, select_docs, trim_history
 from atlas.effects import RefundError, RefundRefused, charge_refund, idempotency_key
@@ -358,6 +358,7 @@ def approval_gate(state: AtlasState) -> Command[Literal["refund", "escalate"]]:
         {
             "action": "issue_refund",
             "ticket_id": ticket["id"],
+            "customer_id": ticket.get("customer_id"),
             "amount": ticket["amount"],
         }
     )
@@ -416,31 +417,36 @@ def _audit(
     customer_id: str | None,
     record: dict,
     event: str = "approval",
-) -> None:
-    if runtime.store is not None:
-        record_approval(
-            runtime.store,
-            customer_id,
-            config["configurable"]["thread_id"],
-            runtime.execution_info.checkpoint_id,
-            record,
-            event=event,
-        )
+) -> str | None:
+    """Append one row; returns its key (None when the graph has no store)."""
+    if runtime.store is None:
+        return None
+    return record_approval(
+        runtime.store,
+        customer_id,
+        config["configurable"]["thread_id"],
+        runtime.execution_info.checkpoint_id,
+        record,
+        event=event,
+    )
 
 
 def shown_mismatch(shown: dict | None, ticket: dict, required: bool) -> str | None:
     """Why a decision does not bind to the ticket now in state, or None.
 
     The resume echoes what the approver was shown - `{"shown": {"ticket_id":
-    ..., "amount": ...}}`, the interrupt's own fields - and the gate, which
-    re-runs on resume from whatever state holds NOW, compares the two. A
-    ticket rewritten while the run was paused no longer matches."""
+    ..., "customer_id": ..., "amount": ...}}`, the interrupt's own fields -
+    and the gate, which re-runs on resume from whatever state holds NOW,
+    compares the two. A ticket rewritten while the run was paused, even
+    only its customer, no longer matches."""
     if shown is None:
         if required:
             return "refused: the decision does not echo what was shown"
         return None
-    if (shown.get("ticket_id"), shown.get("amount")) != (
+    fields = ("ticket_id", "customer_id", "amount")
+    if tuple(shown.get(f) for f in fields) != (
         ticket.get("id"),
+        ticket.get("customer_id"),
         ticket.get("amount"),
     ):
         return "refused: the ticket changed after the approver saw it"
@@ -471,18 +477,19 @@ def make_approval_gate(served: bool) -> Callable[..., Command]:
         refusal = shown_mismatch(approval["shown"], ticket, required=served)  # <2>
         if served:  # <3>
             identity, role_refusal = served_approver(runtime)
-            approval = {**approval, "by": identity}
+            user = runtime.server_info.user if runtime.server_info else None
+            approval = {**approval, "by": identity, "role": role_of(user)}
             refusal = refusal or role_refusal
         if refusal is not None and command.goto == "refund":
             approval = {**approval, "amount": None, "refused": refusal}
             command = Command(
                 update={"approval": approval, "error": refusal}, goto="escalate"
             )
-        command = Command(
+        key = _audit(runtime, config, approval["customer_id"], approval)  # <4>
+        approval = {**approval, "audit_key": key}
+        return Command(
             update={**command.update, "approval": approval}, goto=command.goto
         )
-        _audit(runtime, config, approval["customer_id"], approval)  # <4>
-        return command
 
     return audited_approval_gate
 
@@ -494,36 +501,48 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
     """Chapter 23: the refund authorizes itself, immediately before the
     charge, and writes an audit row on every outcome. A run can reach this
     node without passing the gate - a caller's `Command(goto="refund")`, with
-    or without an `update` - so the gate's routing decision is not enough."""
+    or without an `update`, or a thread created with `supersteps` - so the
+    gate's routing decision is not enough, and neither is the approval in
+    state: it charges only against the gate's own audit row."""
 
     def authorized_refund(
         state: AtlasState, config: RunnableConfig, runtime: Runtime
     ) -> dict | Command[Literal["escalate"]]:
         approval = state.get("approval") or {}
         ticket = state.get("ticket") or {}
+        thread_id = config["configurable"]["thread_id"]
         identity, refusal = (
             served_approver(runtime) if served else (approval.get("by"), None)
         )  # <5>
-        amount = approval.get("amount")
-        if refusal is None and (
-            approval.get("decision") not in ("approve", "edit")
-            or approval.get("refused")
-            or amount is None
-            or amount <= 0
-        ):
-            refusal = "refused: no approved amount for this refund"
-        if refusal is None and (
-            ticket.get("id") != approval.get("ticket_id")
-            or ticket.get("customer_id") != approval.get("customer_id")
-        ):
-            refusal = "refused: the approval is for a different ticket"  # <6>
+        record, key = approval, approval.get("audit_key")
+        if runtime.store is not None:  # <6>
+            record = approval_on_record(
+                runtime.store, approval.get("customer_id"), key
+            )
+            refusal = refusal or row_refusal(record, ticket, thread_id)
+            if refusal is None and served and (
+                record.get("role") not in APPROVER_ROLES
+                or record.get("by") != identity
+            ):
+                refusal = "refused: the approval on record is not this approver's"
+            if refusal is None and charged_rows(
+                runtime.store, record["customer_id"], approval_key=key
+            ):
+                refusal = "refused: this approval has already been charged"
+        elif served:
+            refusal = refusal or "refused: no audit store to verify the approval"
+        else:  # in process with no store: Chapter 11's record, checked as is
+            refusal = refusal or row_refusal(approval, ticket, None)
+        record = record or {}
+        amount = record.get("amount")
+        customer_id = record.get("customer_id") or ticket.get("customer_id")
         row = {
             "by": identity,
             "at": datetime.now(UTC).isoformat(),
             "ticket_id": ticket.get("id"),
             "amount": amount,
+            "approval_key": key,
         }
-        customer_id = approval.get("customer_id") or ticket.get("customer_id")
         if refusal is not None:
             _audit(runtime, config, customer_id,
                    {**row, "amount": None, "outcome": refusal}, event="refund")
@@ -531,9 +550,12 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
                 update={"messages": [AIMessage(f"Refund not issued: {refusal}")]},
                 goto="escalate",
             )
+        replayed = runtime.store is not None and charged_rows(
+            runtime.store, customer_id, thread=thread_id, ticket=ticket.get("id")
+        )  # <7>
         try:
             out = refund({**state, "ticket": {**ticket, "amount": amount}}, config)
-        except RefundRefused as exc:  # <7>
+        except RefundRefused as exc:  # <8>
             _audit(runtime, config, customer_id,
                    {**row, "outcome": f"provider refused: {exc}"}, event="refund")
             return refund_failed(state)
@@ -541,11 +563,40 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
             _audit(runtime, config, customer_id,
                    {**row, "outcome": f"failed: {exc}"}, event="refund")
             raise  # retried by the node's RetryPolicy, then refund_failed
-        _audit(runtime, config, customer_id, {**row, "outcome": "charged"},
-               event="refund")  # <8>
-        return out
+        outcome = "replayed: already charged" if replayed else "charged"
+        _audit(runtime, config, customer_id, {**row, "outcome": outcome},
+               event="refund")  # <9>
+        return {**out, "error": None}  # a stale error does not outlive a charge
 
     return authorized_refund
+
+
+def row_refusal(record: dict | None, ticket: dict, thread_id: str | None) -> str | None:
+    """Why an approval record does not authorize charging `ticket`, or None.
+
+    `record` is the gate's audit row (or, in process with no store, the
+    approval in state). It must be an approve or edit with a positive
+    amount, not refused, for this thread, and for exactly this ticket: its
+    id, its customer, and the amount state now holds (an edit already wrote
+    the edited amount to the ticket)."""
+    if not record:
+        return "refused: no approval on record for this refund"
+    if thread_id is not None and record.get("thread") != thread_id:
+        return "refused: no approval on record for this refund"
+    amount = record.get("amount")
+    if (
+        record.get("decision") not in ("approve", "edit")
+        or record.get("refused")
+        or amount is None
+        or amount <= 0
+    ):
+        return "refused: no approved amount for this refund"
+    if (record.get("ticket_id"), record.get("customer_id")) != (
+        ticket.get("id"),
+        ticket.get("customer_id"),
+    ) or (thread_id is not None and amount != ticket.get("amount")):
+        return "refused: the approval is for a different ticket"
+    return None
 
 
 # 1. The approval record binds the decision to a ticket: its id, its
@@ -564,16 +615,25 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
 # 4. Reached only once `interrupt()` has returned a decision, so the write
 #    happens on the resumed run, after the human acted, never before. Every
 #    execution appends its own row (`record_approval`), refusals included,
-#    in the namespace of the customer the approver confirmed.
+#    in the namespace of the customer the approver confirmed. The row's key
+#    goes into `state["approval"]`: it is how `refund` finds the row.
 # 5. Served: the identity of THIS run, checked again here, so a caller who
 #    routes straight to `refund` meets the same role check the gate applies.
-# 6. An approval is for one ticket and one customer. A stale approval with a
-#    swapped ticket charges nothing. The refusal goes in a message, not
-#    `error`: the gate may be refusing in the same step.
-# 7. The provider's cap (`RefundRefused`) can never succeed on retry, so the
+# 6. `state["approval"]` is caller-writable (run input, a `goto` with an
+#    `update`, a thread created with `supersteps`), so it only says where to
+#    look. The authority is the gate's own audit row, which no caller can
+#    write: it must exist for this thread, be an approve or edit, match this
+#    ticket's id, customer and amount, and - served - be by an approver
+#    role and by THIS run's identity. One charge per row: an approval that
+#    already has a "charged" row authorizes nothing more. The refusal goes
+#    in a message, not `error`: the gate may be refusing in the same step.
+# 7. A fork that passes the gate again writes a new approval, but the
+#    provider dedupes on thread + ticket and charges nothing new; the row
+#    says "replayed", so a reader summing "charged" rows counts money once.
+# 8. The provider's cap (`RefundRefused`) can never succeed on retry, so the
 #    node compensates on the spot with `refund_failed`, the same result the
 #    error handler gives a `RefundError` once its retries run out.
-# 8. Every outcome is on record, success included: a charge with no row
+# 9. Every outcome is on record, success included: a charge with no row
 #    would be a money movement the audit log cannot account for.
 
 

@@ -18,6 +18,7 @@ from langgraph_sdk import Auth
 
 from atlas.auth import (
     assistants_are_read_only,
+    the_store_is_the_graphs,
     authenticate,
     context_for,
     crons_are_scoped_to_their_owner,
@@ -244,9 +245,8 @@ def test_a_resume_only_command_and_a_lead_steering_are_allowed() -> None:
     assert asyncio.run(threads_are_scoped_to_their_owner(agent, resume)) == {
         "owner": "agent-7"
     }
-    assert asyncio.run(threads_are_scoped_to_their_owner(lead, steer)) == {
-        "owner": "lead-3"
-    }
+    assert asyncio.run(threads_are_scoped_to_their_owner(lead, steer)) is None
+    assert steer["metadata"] == {"owner": "lead-3"}  # still stamped
 
 
 def test_a_non_approver_may_not_write_thread_state() -> None:
@@ -267,8 +267,127 @@ def test_a_metadata_patch_a_cancel_and_a_lead_state_write_are_allowed() -> None:
     for ctx, value in [
         (agent, {"thread_id": "t-1", "metadata": {"topic": "billing"}}),
         (agent, {"thread_id": "t-1", "action": "interrupt"}),
-        (lead, {"thread_id": "t-1"}),
     ]:
         assert asyncio.run(threads_are_scoped_to_their_owner(ctx, value)) == {
-            "owner": ctx.user.identity
+            "owner": "agent-7"
         }
+    lead_write = threads_are_scoped_to_their_owner(lead, {"thread_id": "t-1"})
+    assert asyncio.run(lead_write) is None
+
+
+# --- R105: ownership is the server's; approvers reach every thread ------------
+
+AGENT_USER = _User("agent-7", ["role:support_agent"])
+LEAD_USER = _User("lead-3", ["role:support_lead"])
+
+
+def _hook(user: _User, action: str, value: dict[str, Any]) -> Any:
+    return asyncio.run(threads_are_scoped_to_their_owner(_Ctx(user, action), value))
+
+
+@pytest.mark.parametrize("user", [AGENT_USER, LEAD_USER], ids=["agent", "lead"])
+def test_no_caller_may_rewrite_a_threads_owner(user: _User) -> None:
+    """R104 I1: an agent handing its thread to a lead by patching
+    metadata.owner. Refused for every caller, approvers included."""
+    value = {"thread_id": "t-1", "metadata": {"owner": "lead-3"}}
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        _hook(user, "update", value)
+
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "thread ownership is set by the server"
+
+
+def test_an_owner_sent_on_create_is_replaced_by_the_server_stamp() -> None:
+    value: dict[str, Any] = {"metadata": {"owner": "lead-3"}}
+
+    assert _hook(AGENT_USER, "create", value) == {"owner": "agent-7"}
+    assert value["metadata"] == {"owner": "agent-7"}
+
+
+@pytest.mark.parametrize("action", ["read", "search", "create_run", "update"])
+def test_a_lead_may_act_on_an_agents_thread(action: str) -> None:
+    """Role-based access: no owner filter for an approver, so the served
+    "lead approves the agent's refund" flow is reachable over HTTP."""
+    value: dict[str, Any] = {"thread_id": "t-1"}
+    if action == "create_run":
+        value["kwargs"] = {"command": {"resume": {"type": "approve"}}}
+
+    assert _hook(LEAD_USER, action, value) is None
+
+
+@pytest.mark.parametrize("action", ["read", "search"])
+def test_an_agent_still_sees_only_its_own_threads(action: str) -> None:
+    assert _hook(AGENT_USER, action, {"thread_id": "t-1"}) == {"owner": "agent-7"}
+
+
+@pytest.mark.parametrize(
+    "run_input",
+    [
+        {"approval": {"decision": "approve", "amount": 300.0}},
+        {"refund_done": True},
+        {"audit_key": "approval:t:c:x"},
+        {"messages": [], "approval": {}},
+    ],
+)
+def test_a_non_approver_may_not_plant_graph_owned_keys_in_run_input(
+    run_input: dict,
+) -> None:
+    value = {"kwargs": {"input": run_input}}
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        _hook(AGENT_USER, "create_run", value)
+
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "only an approver may set graph-owned state"
+
+
+def test_an_ordinary_refund_request_is_not_refused() -> None:
+    value = {"kwargs": {"input": {"messages": [], "ticket": {"id": "T-1001"}}}}
+
+    assert _hook(AGENT_USER, "create_run", value) == {"owner": "agent-7"}
+
+
+def test_a_non_approver_may_not_create_a_thread_with_supersteps() -> None:
+    """Where a runtime passes `supersteps` to the create hook. The inmem
+    runtime does not; it applies them as a threads "update", which
+    `_writes_state` refuses (tested above)."""
+    value = {"supersteps": [{"updates": [{"command": {"goto": "refund"}}]}]}
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        _hook(AGENT_USER, "create", value)
+
+    assert excinfo.value.status_code == 403
+
+
+# --- R105: the HTTP store API cannot reach the audit log ----------------------
+
+
+def _store(user: _User, action: str, namespace: tuple | None) -> Any:
+    return asyncio.run(
+        the_store_is_the_graphs(_Ctx(user, action), {"namespace": namespace})
+    )
+
+
+@pytest.mark.parametrize("user", [AGENT_USER, LEAD_USER], ids=["agent", "lead"])
+@pytest.mark.parametrize("action", ["put", "get", "search", "delete"])
+@pytest.mark.parametrize("namespace", [("audit", "C-90"), ("audit",), (), None])
+def test_no_caller_reads_or_writes_the_audit_log(
+    user: _User, action: str, namespace: tuple | None
+) -> None:
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        _store(user, action, namespace)
+
+    assert excinfo.value.status_code == 403
+
+
+def test_a_customer_namespace_needs_an_explicit_grant() -> None:
+    granted = _User("portal-1", ["customer:C-90"])
+    ns = ("customer", "C-90", "profile")
+
+    assert _store(LEAD_USER, "get", ns) is False
+    assert _store(granted, "get", ns) is True
+    assert _store(granted, "search", ns) is True
+    assert _store(granted, "put", ns) is False  # read-only, even with a grant
+    assert _store(granted, "get", ("customer", "C-91", "profile")) is False
+    assert _store(LEAD_USER, "get", ("containment", "agent-7")) is False
