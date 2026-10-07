@@ -21,6 +21,7 @@ for real below via a genuine suspend/resume cycle through
 
 import copy
 import os
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -307,6 +308,7 @@ def test_the_monitor_runs_end_to_end_with_the_real_answer_quality(monkeypatch):
     _scripted_judges(monkeypatch)
     run = SimpleNamespace(
         id=0,
+        start_time=datetime.now(timezone.utc) - timedelta(minutes=20),
         inputs={"messages": [{"role": "user", "content": "Close T-1001."}]},
         outputs={"messages": [{"role": "assistant", "content": "Closed."}]},
     )

@@ -17,12 +17,17 @@ reasonable during development.
 `is_root=True`: Chapter 20's `trace_config` tags are inherited by every span
 under the root, so `has(tags, "atlas")` alone also returns the model, tool,
 and node spans, and the judge would grade a tool call as if it were an
-answer. `start_time` is a window as long as the schedule that runs the
-monitor (Chapter 22's cron fires every 15 minutes), so each run scores only
-traffic the previous run did not see, instead of re-reading the newest runs
-and writing a second feedback row on runs it already scored. A window,
-rather than a `since` the caller passes, keeps the monitor stateless:
-Chapter 22's cron starts every run on a fresh thread with only
+answer. `error=False` drops runs that raised: they have no answer to grade.
+
+Each tick scores the window that has just closed, not the one still open:
+it reads from `now - 2 * window` and skips any run that started after
+`now - window`, so a run gets a full schedule period (Chapter 22's cron
+fires every 15 minutes) to finish before it is graded, and consecutive
+ticks score disjoint slices with no second feedback row on a scored run. A
+run still in flight after that has `outputs=None`; it is skipped, because
+`online_judge` raises `KeyError: 'outputs'` on it and would abort the tick.
+A window, rather than a `since` the caller passes, keeps the monitor
+stateless: Chapter 22's cron starts every run on a fresh thread with only
 `sample_rate` as input."""
 
 from datetime import datetime, timedelta, timezone
@@ -38,13 +43,17 @@ def run_quality_monitor(
     sample_rate: float = 0.05, window: timedelta = timedelta(minutes=15)
 ) -> None:
     """Score a sampled slice of tagged production traces (Chapter 20)."""
+    now = datetime.now(timezone.utc)
     runs = client.list_runs(
         project_name="atlas-prod",
         filter='has(tags, "atlas")',
         is_root=True,
-        start_time=datetime.now(timezone.utc) - window,
+        error=False,
+        start_time=now - 2 * window,
     )
     for run in runs:
+        if run.start_time > now - window or run.outputs is None:
+            continue
         if hash(run.id) % 100 >= sample_rate * 100:
             continue
         result = answer_quality(

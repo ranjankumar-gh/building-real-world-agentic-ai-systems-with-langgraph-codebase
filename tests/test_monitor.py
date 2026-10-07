@@ -18,10 +18,20 @@ from atlas import monitor as monitor_module
 from atlas.monitor import run_quality_monitor
 
 
-def _run(run_id, inputs=None, outputs=None):
+_SETTLED = object()
+
+
+def _run(run_id, inputs=None, outputs=_SETTLED, age=timedelta(minutes=20)):
     """A stand-in for a LangSmith Run - just enough shape (.id, .inputs,
-    .outputs) for run_quality_monitor to read, without a live connection."""
-    return SimpleNamespace(id=run_id, inputs=inputs or {}, outputs=outputs or {})
+    .outputs, .start_time) for run_quality_monitor to read, without a live
+    connection. The default age puts it in the window that has just closed
+    (15-30 minutes ago); `outputs=None` is a run still in flight."""
+    return SimpleNamespace(
+        id=run_id,
+        inputs=inputs or {},
+        outputs={} if outputs is _SETTLED else outputs,
+        start_time=datetime.now(timezone.utc) - age,
+    )
 
 
 def test_run_quality_monitor_scores_only_the_sampled_slice(monkeypatch):
@@ -116,6 +126,37 @@ def test_run_quality_monitor_reads_only_root_runs_inside_its_window(monkeypatch)
 
     after = datetime.now(timezone.utc)
     assert seen_kwargs["is_root"] is True
+    assert seen_kwargs["error"] is False  # a run that raised has no answer
     start = seen_kwargs["start_time"]
-    assert before - timedelta(minutes=15) <= start <= after - timedelta(minutes=15)
+    # two windows back: the closed window is read, the open one is skipped
+    assert before - timedelta(minutes=30) <= start <= after - timedelta(minutes=30)
     assert "limit" not in seen_kwargs  # the window bounds the read, not a count
+
+
+def test_run_quality_monitor_skips_open_window_and_in_flight_runs(monkeypatch):
+    """A run still in flight has outputs=None, and online_judge raises
+    KeyError: 'outputs' on it; a run in the still-open window belongs to the
+    next tick. Both are skipped, the tick does not abort, and the settled run
+    in the closed window is still scored."""
+    runs = [
+        _run(run_id=0, outputs=None),  # closed window, still in flight
+        _run(run_id=1, age=timedelta(minutes=5)),  # open window: next tick's
+        _run(run_id=2, outputs={"messages": []}),  # closed window, settled
+    ]
+    monkeypatch.setattr(monitor_module.Client, "list_runs", lambda self, **kw: runs)
+
+    def judge(inputs, outputs):
+        if outputs is None:
+            raise KeyError("outputs")  # what openevals does with outputs=None
+        return {"score": True}
+
+    monkeypatch.setattr(monitor_module, "answer_quality", judge)
+    scored_ids = []
+    monkeypatch.setattr(
+        monitor_module.Client, "create_feedback",
+        lambda self, run_id, key, score: scored_ids.append(run_id),
+    )
+
+    run_quality_monitor(sample_rate=1.0)
+
+    assert scored_ids == [2]
