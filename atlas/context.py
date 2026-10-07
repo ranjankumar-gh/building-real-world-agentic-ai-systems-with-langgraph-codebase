@@ -33,12 +33,16 @@ async twin `awrap_model_call` (Chapter 8 states the rule for
 `ainvoke`/`astream` the model node calls the async hook, and a middleware
 with only the sync one raises `NotImplementedError` there).
 
-The trim passes no `include_system`: `ModelRequest.messages` excludes the
-system message (`create_agent` carries it as `request.system_message` and
-prepends it only when it calls the model), so there is no system prompt in
-the list to keep, and the prompt never counts against `history`. The same
-holds for `triage`: its classifier's system prompt lives on the agent, not
-in `state["messages"]`.
+The trim passes `include_system=True`, which keeps a SystemMessage at index 0
+of the list it is given. The agent's own system prompt is never in that list:
+`ModelRequest.messages` excludes it (`create_agent` carries it as
+`request.system_message` and prepends it only when it calls the model), so
+the prompt is never trimmed and never counts against `history`. What the flag
+keeps is a system message the *caller* put first in the conversation:
+Chapter 17's mount adapter (`atlas/resolve.py`) opens the mounted agent's
+input with one built from the capped documents and the customer profile, and
+without the flag `start_on="human"` would drop it. With no leading system
+message - `triage`, and any plain conversation - the trim is unchanged.
 
 `atlas/state.py`'s `Doc` has carried `score: float` since Chapter 5 (set
 by the retriever); `select_docs` is its first reader."""
@@ -74,6 +78,7 @@ def trim_history(messages: list[AnyMessage], max_tokens: int) -> list[AnyMessage
         token_counter=count_tokens_approximately,
         strategy="last",  # keep the most recent turns
         start_on="human",
+        include_system=True,  # a leading SystemMessage survives the cut
     )
 
 

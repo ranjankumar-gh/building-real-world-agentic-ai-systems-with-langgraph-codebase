@@ -15,6 +15,7 @@ from langchain.agents.middleware import (
     ModelResponse,
     SummarizationMiddleware,
 )
+from langchain_anthropic.chat_models import _format_messages
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -23,6 +24,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from atlas import agent as agent_module
 from atlas import graph as graph_module
 from atlas.breaks import ScriptedModel
+from atlas.context import BUDGET, ContextBudget
 from atlas.graph import build_graph
 from atlas.resolve import context_message, make_resolve_node
 from atlas.state import AtlasState
@@ -121,6 +123,40 @@ def test_context_message_says_so_when_nothing_was_retrieved_or_recalled() -> Non
 
     assert "Retrieved articles:\nnone" in context.content
     assert "nothing yet" in context.content
+
+
+def test_the_context_message_reaches_the_model_under_the_context_budget() -> None:
+    """ContextBudget (Chapter 12) trims each call's view with
+    `start_on="human"`; `include_system=True` keeps the adapter's leading
+    system message, and langchain-anthropic folds it into the system block
+    beside the agent's own prompt, so the request order stays valid."""
+    seen: list[list[BaseMessage]] = []
+
+    class RecordingModel(FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen.append(list(messages))
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    agent = create_agent(
+        model=RecordingModel(responses=[AIMessage("resolved")]),
+        tools=[],
+        system_prompt="resolve prompt",
+        middleware=[ContextBudget(BUDGET)],
+    )
+    state = _resolve_state(
+        [HumanMessage("where is my order", id="h1")],
+        customer_profile={"last_issue": "late delivery"},
+    )
+
+    make_resolve_node(agent)(state)
+
+    [received] = seen
+    assert [m.type for m in received] == ["system", "system", "human"]
+    assert "Orders ship in 2 days." in received[1].content
+    system, turns = _format_messages(received)
+    assert [block["text"] for block in system][0] == "resolve prompt"
+    assert "last_issue: late delivery" in system[1]["text"]
+    assert [t["role"] for t in turns] == ["user"]
 
 
 def test_resolve_node_keeps_the_reply_after_the_summarizer_shortens_the_list() -> None:

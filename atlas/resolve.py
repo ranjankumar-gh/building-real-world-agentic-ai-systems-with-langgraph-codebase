@@ -13,7 +13,10 @@ built from what `retrieve` and `recall` already produced -
 `state["retrieved"]` (capped to the retrieved slice by `select_docs` in
 `retrieve`, Chapter 12) and `customer_profile` (Chapter 13). Without it the
 mounted agent would read only `messages`, and the capped documents and the
-profile would go unused on that path. Both are labeled reference material:
+profile would go unused on that path. It survives `ContextBudget`, whose
+trim keeps a leading system message (`include_system=True`), and
+langchain-anthropic folds it into the system block beside the agent's own
+prompt. Both are labeled reference material:
 Chapter 13 treats retrieved and recalled text as untrusted context.
 
 What the wrapper returns: the agent's new turn, found by message id, not by

@@ -49,9 +49,10 @@ summarization still compresses the durable history before `ContextBudget`
 trims the per-call view of it, satisfying "Budget and summarization must
 compose in the right order" structurally, not by list ordering.
 
-Chapter 23, "Security, Privacy, Cost, and Governance", folds in the four
-middleware from `atlas/security.py`, `atlas/cost.py`, and `atlas/audit.py`:
-`RoleAuthorityGate`, `InjectionGuard`, `TenantBudgetGuard`, and `AuditGate`.
+Chapter 23, "Security, Privacy, Cost, and Governance", folds in the five
+middleware from `atlas/containment.py`, `atlas/security.py`, `atlas/cost.py`,
+and `atlas/audit.py`: `RevocationGate`, `RoleAuthorityGate`, `InjectionGuard`,
+`TenantBudgetGuard`, and `AuditGate`.
 Before this chapter's increment they existed but were never attached to
 `resolve_agent` - the prose argued for them, the stack did not carry them.
 `RoleAuthorityGate` and `AuditGate` both read `request.runtime.context`, so
