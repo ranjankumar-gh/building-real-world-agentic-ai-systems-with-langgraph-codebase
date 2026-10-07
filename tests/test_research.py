@@ -549,8 +549,20 @@ def test_research_graph_honors_max_concurrency_in_the_invoke_config():
 def test_research_ns_scopes_by_customer_id():
     """Same privacy-boundary shape as atlas/memory.py's profile_ns, pointed
     at a "research" namespace instead of "profile"."""
-    assert research_ns("cust-1") == ("customer", "cust-1", "research")
+    assert research_ns("cust-1") == ("customer", "cust-1", "research-findings")
     assert research_ns("cust-1") != research_ns("cust-2")
+
+
+def test_research_ns_does_not_share_the_deep_agent_namespace():
+    """Chapter 18's deep agent writes files under ("customer", id,
+    "research"); cached findings get their own label."""
+    assert research_ns("cust-1") != ("customer", "cust-1", "research")
+
+
+@pytest.mark.parametrize("bad", ["", "cust.1", "cust%", "cust_1", "a/b"])
+def test_research_ns_refuses_an_id_that_could_widen_a_match(bad):
+    with pytest.raises(ValueError):
+        research_ns(bad)
 
 
 def test_recall_finding_returns_none_on_a_genuine_miss():

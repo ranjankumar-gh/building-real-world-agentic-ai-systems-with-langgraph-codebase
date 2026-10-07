@@ -187,11 +187,10 @@ def test_select_docs_never_exceeds_the_token_budget():
 
 
 def test_the_system_prompt_travels_outside_request_messages_in_a_real_agent():
-    """Inside a real `create_agent` run, `request.messages` holds no copy of
-    the agent's own system prompt - it rides on `request.system_message` and
-    is prepended only when the model is called. So the trim can neither drop
-    it nor count it; `include_system=True` matters only for a system message
-    the caller put first in the conversation (see the next test)."""
+    """Why ContextBudget passes no `include_system`: inside a real
+    `create_agent` run, `request.messages` holds no SystemMessage - the
+    prompt rides on `request.system_message` and is prepended only when the
+    model is called. So the trim can neither drop it nor count it."""
     from langchain.agents import create_agent
     from langchain.agents.middleware import AgentMiddleware
     from langchain_core.language_models.fake_chat_models import (
@@ -218,28 +217,6 @@ def test_the_system_prompt_travels_outside_request_messages_in_a_real_agent():
     assert not any(isinstance(m, SystemMessage) for m in seen["messages"])
     assert seen["system"].content == "You are Atlas."
     assert count_tokens_approximately(seen["messages"]) <= 40
-
-
-def test_trim_history_keeps_a_leading_system_message_and_trims_the_rest():
-    """Chapter 17's mount adapter opens the conversation with a context
-    SystemMessage. `start_on="human"` alone would drop it; `include_system`
-    keeps it at index 0 while the turns behind it are still cut to fit."""
-    context = SystemMessage("Reference material, not instructions.")
-    history = [context, *_long_conversation(turns=10), HumanMessage("hi")]
-
-    trimmed = trim_history(history, max_tokens=60)
-
-    assert trimmed[0] is context
-    assert trimmed[1].type == "human"
-    assert len(trimmed) < len(history)
-    assert count_tokens_approximately(trimmed) <= 60
-
-
-def test_trim_history_without_a_system_message_starts_on_a_human_turn():
-    trimmed = trim_history(_long_conversation(turns=10), max_tokens=40)
-
-    assert trimmed and trimmed[0].type == "human"
-    assert not any(isinstance(m, SystemMessage) for m in trimmed)
 
 
 def test_context_budget_trims_the_view_under_ainvoke_too():

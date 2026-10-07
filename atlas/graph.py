@@ -105,8 +105,9 @@ whole slice leaves the list empty, which is Chapter 6's "nothing usable"
 path: retry, then escalate - never a reply that found nothing. Because the
 cap lives in `retrieve`, `retrieved` is capped whatever node is mounted at
 "answer" through `build_graph` (Chapter 17's pattern); `atlas/resolve.py`'s
-adapter hands that mounted agent the capped documents and the profile in one
-system message, and the agent's own `ContextBudget` bounds its history.
+adapter hands that mounted agent the capped documents and the profile as
+reference text appended to its system message, and the agent's own
+`ContextBudget` bounds its history.
 
 Chapter 13, "Short-Term vs Long-Term Memory", adds `recall` and `remember` -
 the node-facing side of the cross-thread store (`atlas/memory.py` holds the
@@ -540,16 +541,16 @@ def build_graph(
     """Chapter 17 adds `resolve_node`: the callable mounted as "answer"
     (`atlas/resolve.py`'s `make_resolve_node` builds one); None keeps the
     model-free `answer`. Chapter 21, "Testing non-determinism: replaying a
-    checkpoint", gives `model=` its use: factor the model out to a
-    parameter, the way `create_agent` already takes one, instead of the module-level `classify` every node closes over. `model=
-    None` reconstructs the exact same graph as the module-level `graph`
-    below (the real, `create_agent`-backed `classify`); passing Chapter 1's
-    `atlas.breaks.ScriptedModel` swaps ONLY the triage step's decision
-    source - `triage_node` below reads the scripted model's next response
-    directly, the same one-call-per-turn contract `ScriptedModel` already
-    provides - so a replay fixture can force a specific route deterministically,
-    with zero real model calls, without touching `builder`/`graph` any other
-    test or CI depends on."""
+    checkpoint", gives `model=` its use: the model is a parameter, the way
+    `create_agent` already takes one, instead of the module-level `classify`
+    every node closes over. `model=None` reconstructs the exact same graph
+    as the module-level `graph` below (the real, `create_agent`-backed
+    `classify`); passing Chapter 1's `atlas.breaks.ScriptedModel` swaps ONLY
+    the triage step's decision source - `triage_node` below reads the
+    scripted model's next response directly, the same one-call-per-turn
+    contract `ScriptedModel` already provides - so a replay fixture can force
+    a specific route deterministically, with zero real model calls, without
+    touching `builder`/`graph` any other test or CI depends on."""
     if model is None:
         triage_node = triage
     else:

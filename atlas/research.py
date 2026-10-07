@@ -105,6 +105,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Send
 
+from atlas.memory import SAFE_ID
 from atlas.tools import search_kb, text_of, web_search_tool
 
 
@@ -324,8 +325,14 @@ research_graph = research_builder.compile()  # the map-reduce pipeline
 DEFAULT_TTL_DAYS = 30
 
 
-def research_ns(customer_id: str) -> tuple:
-    return ("customer", customer_id, "research")
+def research_ns(customer_id: str) -> tuple[str, ...]:
+    """Cached findings for one customer. Its own label, so it never shares
+    Chapter 18's deep-agent namespace ("customer", id, "research"), and the
+    same SAFE_ID check as `profile_ns`: an id that could widen a match is
+    refused."""
+    if not SAFE_ID.fullmatch(customer_id):
+        raise ValueError(f"unsafe customer id: {customer_id!r}")
+    return ("customer", customer_id, "research-findings")
 
 
 def recall_finding(store: BaseStore, customer_id: str, query: str) -> list[str] | None:
