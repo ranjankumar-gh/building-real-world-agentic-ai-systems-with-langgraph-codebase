@@ -12,6 +12,11 @@ Keeping triage and the tool-using `resolve_agent` (`atlas/agent.py`) as
 separate agents means neither one ever meets it.
 
 `atlas/graph.py`'s `triage` node imports `classify` from here now.
+
+Chapter 10, "Durable Execution, Long-Running Workflows, and State Migration",
+adds the fourth route: "refund" joins `TriageResult.route` and the prompt, so
+the model can propose it, and `ALLOWED_ROUTES` in `atlas/graph.py`, so triage
+accepts it. Either half alone leaves the refund node unreachable.
 """
 
 from typing import Literal
@@ -25,7 +30,7 @@ from pydantic import BaseModel, Field
 class TriageResult(BaseModel):
     """The triage decision for an incoming support message."""
 
-    route: Literal["answer", "retrieve", "escalate"] = Field(
+    route: Literal["answer", "retrieve", "escalate", "refund"] = Field(
         description="Where the conversation should go next."
     )
     reason: str = Field(description="One short sentence justifying the route.")
@@ -34,7 +39,8 @@ class TriageResult(BaseModel):
 TRIAGE_PROMPT = (
     "You are the triage step for Atlas. Decide where the conversation goes "
     "next. Choose 'retrieve' for factual questions, 'answer' for simple "
-    "replies, and 'escalate' when a human is needed."
+    "replies, 'escalate' when a human is needed, and 'refund' when the "
+    "customer asks for money back on a ticket."
 )
 
 triage_agent = create_agent(

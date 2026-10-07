@@ -261,8 +261,9 @@ def escalate(state: AtlasState) -> dict:
 def refund_already_done(state: AtlasState) -> bool:
     """Chapter 10, "State migration without downtime": the additive-
     migration-safe read. A checkpoint written before this chapter has no
-    `refund_done` key at all - `state["refund_done"]` would raise KeyError
-    resuming one of those; `.get` with a default does not."""
+    `refund_done` key at all, and neither does a new run that has not reached
+    the refund (only the refund node writes it) - `state["refund_done"]` would
+    raise KeyError on both; `.get` with a default does not."""
     return state.get("refund_done", False)  # resumes old checkpoints safely
 
 

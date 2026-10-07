@@ -7,6 +7,8 @@ monkeypatch `triage_agent.invoke` itself so no live model call happens
 in Chapter 2), while still exercising `classify`'s own unwrapping logic and
 `TriageResult`'s validation."""
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
@@ -14,7 +16,7 @@ from atlas import triage as triage_module
 from atlas.triage import TRIAGE_PROMPT, TriageResult, classify, triage_agent
 
 
-def test_triage_result_accepts_only_the_three_legal_routes():
+def test_triage_result_accepts_a_legal_route():
     result = TriageResult(route="retrieve", reason="Factual question about refunds.")
 
     assert result.route == "retrieve"
@@ -46,6 +48,27 @@ def test_triage_agent_is_built_tool_free():
     assert hasattr(triage_agent, "invoke")
 
 
-def test_triage_prompt_names_all_three_routes():
-    for route in ("retrieve", "answer", "escalate"):
+def test_triage_prompt_names_all_four_routes():
+    for route in ("retrieve", "answer", "escalate", "refund"):
         assert route in TRIAGE_PROMPT
+
+
+# --- Chapter 10: the fourth route --------------------------------------------
+
+
+def test_triage_result_accepts_the_chapter_10_refund_route():
+    """Chapter 10: the real schema - not a stand-in - lets the model propose
+    "refund", so the refund node is reachable with the real classifier."""
+    result = TriageResult(route="refund", reason="Customer wants money back.")
+
+    assert result.route == "refund"
+    assert "refund" in get_args(TriageResult.model_fields["route"].annotation)
+
+
+def test_classify_schema_and_prompt_offer_refund():
+    """The schema `triage_agent` is built with and the prompt it is given both
+    name "refund" - checked on the real objects, with no monkeypatching."""
+    schema = TriageResult.model_json_schema()
+
+    assert "refund" in schema["properties"]["route"]["enum"]
+    assert "'refund'" in TRIAGE_PROMPT
