@@ -1,6 +1,6 @@
 """Chapter 21, "Evaluation and Testing" - atlas/monitor.py.
 
-See "The online quality monitor: the same judge, a different data source".
+See "The online quality monitor: the same judge model, no reference".
 `run_quality_monitor`'s own logic (the hash-based sampling, the
 answer_quality/create_feedback wiring) is exercised below by monkeypatching
 `Client.list_runs`/`Client.create_feedback` (the LangSmith `Client`'s

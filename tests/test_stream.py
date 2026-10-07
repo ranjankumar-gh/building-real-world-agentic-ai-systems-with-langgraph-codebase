@@ -1,19 +1,38 @@
 """Chapter 19, "Streaming" - atlas/stream.py.
 
-See "Building the multiplexed stream". `stream_atlas` wraps `atlas/graph.py`'s
-compiled `graph` with `stream_mode=["updates", "messages", "custom"]`,
-`subgraphs=True`, `version="v2"`, and normalizes every chunk into
-`{"kind", "source", "data"}`. These tests monkeypatch the same seams
-`tests/test_graph.py` already does (`classify`/`search_kb`/`compose_answer`)
-to avoid a live model call - the point under test is the multiplexing and
-namespace-normalization this chapter adds, not the model's own token
-streaming.
+See "Building the multiplexed stream". `stream_atlas` wraps a compiled graph
+(by default `atlas/graph.py`'s `graph`) with `stream_mode=["updates",
+"messages", "custom"]`, `subgraphs=True`, `version="v2"`, and normalizes every
+chunk into `{"kind", "source", "data"}`. The first tests monkeypatch the same
+seams `tests/test_graph.py` already does (`classify`/`search_kb`/
+`compose_answer`) to avoid a live model call - the point under test is the
+multiplexing and namespace-normalization this chapter adds.
+
+The redaction tests drive a small graph whose mounted agent streams an email
+address split across token deltas, the way a real tokenizer splits one, and
+assert that no event on the stream carries the raw address. The disconnect
+tests pin the two drivers: closing `stream_atlas` stops an in-process run;
+closing `stream_detached` does not.
 """
 
+import re
+import time
+from collections.abc import Iterator
 from types import SimpleNamespace
+from typing import Any, TypedDict
+
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.types import Interrupt
 
 from atlas import graph as graph_module
-from atlas.stream import stream_atlas
+from atlas.stream import REDACTED, hold_back, redact, stream_atlas, stream_detached
 
 
 def _decision(route: str):
@@ -89,3 +108,218 @@ def test_stream_atlas_carries_the_route_triage_decided_in_its_updates_payload(
     ]
     # triage's update also carries the Chapter 6 per-question guard reset
     assert [update["route"] for update in triage_updates] == ["escalate"]
+
+
+# --- Redaction on the stream ------------------------------------------------
+
+ADDRESS = "jane.doe@example.com"
+ANY_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# The address split across deltas, the way a tokenizer splits one.
+DELTAS = ["Reach ", "me at jane", ".doe@exa", "mple", ".com today."]
+
+
+class SplitDeltaModel(BaseChatModel):
+    """Odd calls: a tool call whose args carry the address. Even calls: text
+    whose address is split across token deltas."""
+
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "split-delta"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "SplitDeltaModel":
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        chunks = [c.message for c in self._stream(messages, stop, run_manager)]
+        merged = chunks[0]
+        for chunk in chunks[1:]:
+            merged = merged + chunk
+        message = AIMessage(
+            content=merged.content, tool_calls=merged.tool_calls, id=merged.id
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(
+        self, messages, stop=None, run_manager=None, **kwargs
+    ) -> Iterator[ChatGenerationChunk]:
+        self.calls += 1
+        if self.calls % 2 == 1:
+            call = {
+                "name": "lookup",
+                "args": f'{{"who": "{ADDRESS}"}}',
+                "id": "call-1",
+                "index": 0,
+            }
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(content="", tool_call_chunks=[call])
+            )
+            return
+        for delta in DELTAS:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=delta))
+
+
+@tool
+def lookup(who: str) -> str:
+    """Look a customer up."""
+    get_stream_writer()({"progress": f"looking up {who}"})
+    return f"found {who}"
+
+
+def _graph_with_a_streaming_agent():
+    agent = create_agent(SplitDeltaModel(), tools=[lookup], name="resolve-agent")
+
+    def answer(state: MessagesState) -> dict:
+        return agent.invoke(state)
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.add_edge(START, "answer")
+    builder.add_edge("answer", END)
+    return builder.compile()
+
+
+def _inputs() -> dict:
+    return {"messages": [{"role": "user", "content": f"I am {ADDRESS}"}]}
+
+
+def _answer_text(events: list[dict]) -> str:
+    return "".join(
+        event["data"][0].text
+        for event in events
+        if event["kind"] == "messages" and isinstance(event["data"][0], AIMessageChunk)
+    )
+
+
+def test_the_unredacted_stream_carries_the_address():
+    """The control: graph.stream() itself redacts nothing."""
+    graph = _graph_with_a_streaming_agent()
+    chunks = list(
+        graph.stream(
+            _inputs(),
+            stream_mode=["updates", "messages", "custom"],
+            subgraphs=True,
+            version="v2",
+        )
+    )
+    assert any(ANY_ADDRESS.search(repr(chunk["data"])) for chunk in chunks)
+
+
+def test_stream_atlas_sends_no_address_on_any_event():
+    graph = _graph_with_a_streaming_agent()
+
+    events = list(stream_atlas(_inputs(), {}, graph=graph))
+
+    assert {"updates", "messages", "custom"} <= {event["kind"] for event in events}
+    assert not [event for event in events if ANY_ADDRESS.search(repr(event))]
+
+
+def test_stream_atlas_redacts_an_address_split_across_token_deltas():
+    graph = _graph_with_a_streaming_agent()
+
+    events = list(stream_atlas(_inputs(), {}, graph=graph))
+
+    assert _answer_text(events) == f"Reach me at {REDACTED} today."
+
+
+def test_stream_atlas_redacts_tool_reported_progress():
+    graph = _graph_with_a_streaming_agent()
+
+    events = list(stream_atlas(_inputs(), {}, graph=graph))
+
+    progress = [event["data"] for event in events if event["kind"] == "custom"]
+    assert progress == [{"progress": f"looking up {REDACTED}"}]
+
+
+def test_stream_atlas_tags_a_mounted_agent_with_its_namespace():
+    """ns names the node that started the subgraph: answer:<task_id>."""
+    graph = _graph_with_a_streaming_agent()
+
+    events = list(stream_atlas(_inputs(), {}, graph=graph))
+
+    nested = {event["source"] for event in events if event["source"] != ("main",)}
+    assert nested and all(source[0].startswith("answer:") for source in nested)
+
+
+def test_hold_back_releases_text_only_up_to_the_last_whitespace():
+    held: dict[str, str] = {}
+
+    first = hold_back(held, AIMessageChunk(content="me at jane", id="m"))
+    last = hold_back(
+        held,
+        AIMessageChunk(content=".doe@example.com", id="m", chunk_position="last"),
+    )
+
+    assert first.text == "me at "
+    assert last.text == REDACTED
+    assert held == {}
+
+
+def test_redact_reaches_messages_tool_calls_and_interrupts():
+    message = AIMessage(
+        content=f"cc {ADDRESS}",
+        tool_calls=[{"name": "lookup", "args": {"who": ADDRESS}, "id": "c1"}],
+    )
+    payload = {
+        "answer": {"messages": [message, HumanMessage(f"I am {ADDRESS}")]},
+        "__interrupt__": (Interrupt(value={"note": ADDRESS}, id="i1"),),
+    }
+
+    assert not ANY_ADDRESS.search(repr(redact(payload)))
+    assert ADDRESS in repr(payload)  # the original is not mutated
+
+
+# --- Disconnect: who drives the run -----------------------------------------
+
+
+class Steps(TypedDict):
+    ran: list[str]
+
+
+def _three_steps():
+    def step(name: str):
+        def node(state: Steps) -> dict:
+            time.sleep(0.05)
+            return {"ran": state["ran"] + [name]}
+
+        return node
+
+    builder = StateGraph(Steps)
+    for name in ("n1", "n2", "n3"):
+        builder.add_node(name, step(name))
+    builder.add_edge(START, "n1")
+    builder.add_edge("n1", "n2")
+    builder.add_edge("n2", "n3")
+    builder.add_edge("n3", END)
+    return builder.compile(checkpointer=InMemorySaver())
+
+
+def test_closing_stream_atlas_stops_an_in_process_run_and_stream_none_resumes():
+    graph = _three_steps()
+    config = {"configurable": {"thread_id": "reader-drives"}}
+
+    events = stream_atlas({"ran": []}, config, graph=graph)
+    next(events)
+    events.close()  # the client disconnects; nothing else is reading
+    time.sleep(0.3)
+
+    assert graph.get_state(config).values["ran"] == ["n1"]
+    list(graph.stream(None, config))  # resume on the same thread (Chapter 9)
+    assert graph.get_state(config).values["ran"] == ["n1", "n2", "n3"]
+
+
+def test_closing_stream_detached_closes_the_live_channel_not_the_run():
+    graph = _three_steps()
+    config = {"configurable": {"thread_id": "worker-drives"}}
+
+    events = stream_detached({"ran": []}, config, graph=graph, maxsize=1)
+    next(events)
+    events.close()
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if graph.get_state(config).values.get("ran") == ["n1", "n2", "n3"]:
+            break
+        time.sleep(0.05)
+    assert graph.get_state(config).values["ran"] == ["n1", "n2", "n3"]

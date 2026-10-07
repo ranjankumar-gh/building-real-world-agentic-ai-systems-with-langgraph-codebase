@@ -1,6 +1,6 @@
 """Chapter 21, "Evaluation and Testing" - the online quality monitor.
 
-See "The online quality monitor: the same judge, a different data source".
+See "The online quality monitor: the same judge model, no reference".
 CI (`atlas/evals.py`) answers "did this change regress." It says nothing
 about whether production quality is holding *today*, against real traffic
 no dataset was built to anticipate. `run_quality_monitor` reuses the same
@@ -18,7 +18,7 @@ from langsmith import Client
 
 from atlas.evals import answer_quality
 
-client = Client()  # local construction only - no network call, no API key needed
+client = Client()  # no API key needed to build; its background thread fetches /info
 
 
 def run_quality_monitor(sample_rate: float = 0.05) -> None:
