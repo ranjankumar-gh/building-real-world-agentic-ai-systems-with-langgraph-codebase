@@ -44,11 +44,15 @@ plus `ReferenceContext` as one more, innermost layer - in the answering
 position, via `make_resolve_node`. The base `RESOLVE_MIDDLEWARE` list is
 unchanged. `mount_resolve_agent`'s import of `atlas.agent` is inside the
 function, not at module level, for the same reason `atlas/graph.py`'s
-`answer` stays the default node - importing `atlas.agent` builds a chat
-model, and hoisting that import to the top of
+`answer` stays the default node: importing `atlas.agent` loads the MCP
+adapters and the whole resolve middleware stack (about 235 more modules,
+and two more chat-model objects), and hoisting that import to the top of
 this module would make every importer of `atlas.resolve` (including the
-offline tests) pay that cost too. Once Chapter 23 gives `resolve_agent` a
-`context_schema`, invoke the resolved graph with `context=AtlasContext(...)`;
+offline tests) pay that cost too. It does not make `atlas.resolve`
+model-free: `atlas.graph` already builds the classifier's model and the
+research coordinator's when it is imported. Building one makes no call.
+
+Once Chapter 23 gives `resolve_agent` a `context_schema`, invoke the resolved graph with `context=AtlasContext(...)`;
 the nested agent inherits the parent invoke's context."""
 
 from collections.abc import Awaitable, Callable
@@ -132,9 +136,9 @@ def make_resolve_node(agent: CompiledStateGraph) -> Callable[[AtlasState], dict]
 
 def mount_resolve_agent() -> CompiledStateGraph:
     """`resolve_agent`'s configuration plus one layer, `ReferenceContext`."""
-    # Imported here, not at module level - see the module docstring. Every
-    # offline test that only needs make_resolve_node must not pay the cost
-    # of atlas.agent constructing a chat model at import time.
+    # Imported here, not at module level: importing atlas.agent loads the
+    # MCP adapters and the whole middleware stack, which the offline tests
+    # that only need make_resolve_node never use.
     from atlas.agent import RESOLVE_MIDDLEWARE, RESOLVE_PROMPT, RESOLVE_TOOLS, model
     from atlas.security import AtlasContext
 

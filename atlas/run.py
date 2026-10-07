@@ -180,8 +180,10 @@ def _research_config(thread_id: str, max_concurrency: int) -> RunnableConfig:
 
 
 def run_research(sources: list[str], thread_id: str, max_concurrency: int = 8) -> dict:
-    """Run the research fan-out on a thread, at most `max_concurrency`
-    workers at once; the rest queue and fill in as slots free."""
+    """Run the research fan-out on a fresh thread, at most `max_concurrency`
+    workers at once; the rest queue and fill in as slots free. One
+    thread_id per run: `findings` is an add channel, so a second run on
+    the same thread appends to the first run's findings."""
     config = _research_config(thread_id, max_concurrency)
     return research_runner.invoke({"sources": sources}, config)
 

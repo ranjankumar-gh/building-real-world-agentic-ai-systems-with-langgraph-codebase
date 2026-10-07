@@ -37,15 +37,17 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
 import pytest
 from langchain.agents import create_agent
 from langchain_anthropic.chat_models import _format_messages
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.prebuilt.tool_node import ToolRuntime
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Send
 
@@ -220,7 +222,9 @@ def test_web_research_reads_only_the_scoped_assignment_not_the_full_history(monk
     assert captured_input["messages"] == [
         {"role": "user", "content": "Find the refund policy."}
     ]
-    assert result["findings"] == ["Refunds: 30-day window."]
+    assert result["findings"] == [
+        {"source": "web_research", "result": "Refunds: 30-day window."}
+    ]
     [report] = result["messages"]
     assert (report.type, report.name) == ("human", "web_research")
     assert report.content == "web_research found: Refunds: 30-day window."
@@ -273,7 +277,9 @@ def test_doc_research_reads_only_the_scoped_assignment_not_the_full_history(
     assert captured_input["messages"] == [
         {"role": "user", "content": "Find the refund policy."}
     ]
-    assert result["findings"] == ["Refunds: 30-day window."]
+    assert result["findings"] == [
+        {"source": "doc_research", "result": "Refunds: 30-day window."}
+    ]
     assert result["messages"][0].name == "doc_research"
 
 
@@ -394,7 +400,9 @@ def test_supervisor_graph_round_trip_handoff_specialist_back_and_normal_end(
     )
 
     assert out["handoffs"] == 1
-    assert out["findings"] == ["Refunds: 30-day window."]
+    assert out["findings"] == [
+        {"source": "web_research", "result": "Refunds: 30-day window."}
+    ]
     assert out["messages"][-1].content == "Refunds are honored for 30 days."
     second_call = model.seen[1]
     assert [m.type for m in second_call] == ["system", "human", "ai", "tool", "human"]
@@ -443,6 +451,57 @@ def test_a_coordinator_that_never_stops_degrades_to_compile_at_the_bound(
     assert out["handoffs"] == MAX_HANDOFFS
     assert len(model.seen) == MAX_HANDOFFS
     assert out["messages"][-1].content.startswith("Handoff limit reached.")
+
+
+def test_specialists_and_map_workers_write_the_same_finding_shape(monkeypatch):
+    """One `findings` type for both research forms: a dict with a `source`
+    and a `result` (or an `error`), whether a Chapter 16 specialist or a
+    Chapter 17 worker wrote it."""
+
+    class _FakeAgent:
+        def invoke(self, input_):
+            return {"messages": [AIMessage("ok")]}
+
+    monkeypatch.setattr(research_module, "create_agent", lambda **_: _FakeAgent())
+
+    [specialist] = web_research({"assignment": "t"})["findings"]
+    [worker] = research_worker({"source": "docs.internal/sla"})["findings"]
+
+    assert set(specialist) == set(worker) == {"source", "result"}
+
+
+def test_a_subgraph_keeps_its_own_keys_private_from_the_parent():
+    """Chapter 17's private subgraph channels: mounted directly in a parent
+    that declares `messages` and `sources`, research_graph runs, but
+    `findings` - a key only its own schema declares - never reaches the
+    parent's next node, its output, or its checkpoint."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class Parent(TypedDict):
+        messages: Annotated[list[AnyMessage], add_messages]
+        sources: list[str]
+
+    seen: list[list[str]] = []
+
+    def after(state: Parent) -> dict:
+        seen.append(sorted(state))
+        return {}
+
+    builder = StateGraph(Parent)
+    builder.add_node("research", research_graph)
+    builder.add_node("after", after)
+    builder.add_edge(START, "research")
+    builder.add_edge("research", "after")
+    builder.add_edge("after", END)
+    parent = builder.compile(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "private-channels"}}
+
+    out = parent.invoke(
+        {"messages": [("user", "hi")], "sources": ["docs.internal/sla"]}, config
+    )
+
+    assert sorted(out) == seen[0] == ["messages", "sources"]
+    assert "findings" not in parent.get_state(config).values
 
 
 def test_supervisor_graph_compiles_with_the_real_coordinator():

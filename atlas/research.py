@@ -116,7 +116,7 @@ class ResearchState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     assignment: str  # the scoped handoff payload
     sources: list[str]  # NEW (Chapter 17): the map-reduce fan-out list
-    findings: Annotated[list[dict], add]  # widened: workers now write dicts
+    findings: Annotated[list[dict], add]  # one dict per finding, any writer
     handoffs: int  # explicit bound (Chapter 6)
 
 
@@ -190,7 +190,10 @@ def web_research(state: ResearchState) -> dict:
         {"messages": [{"role": "user", "content": state["assignment"]}]}
     )
     finding = text_of(result["messages"][-1])
-    return {"findings": [finding], "messages": [report("web_research", finding)]}
+    return {
+        "findings": [{"source": "web_research", "result": finding}],
+        "messages": [report("web_research", finding)],
+    }
 
 
 def doc_research(state: ResearchState) -> dict:
@@ -207,7 +210,10 @@ def doc_research(state: ResearchState) -> dict:
         {"messages": [{"role": "user", "content": state["assignment"]}]}
     )
     finding = text_of(result["messages"][-1])
-    return {"findings": [finding], "messages": [report("doc_research", finding)]}
+    return {
+        "findings": [{"source": "doc_research", "result": finding}],
+        "messages": [report("doc_research", finding)],
+    }
 
 
 MAX_HANDOFFS = 6
@@ -222,7 +228,7 @@ def route_from_specialist(state: ResearchState) -> str:
 
 def compile_findings(state: ResearchState) -> dict:
     """The bound's exit: answer with what the specialists found so far."""
-    found = "\n".join(f"- {f}" for f in state["findings"])
+    found = "\n".join(f"- {f['source']}: {f['result']}" for f in state["findings"])
     return {"messages": [AIMessage(f"Handoff limit reached. Findings:\n{found}")]}
 
 
@@ -303,7 +309,7 @@ def fan_out(state: ResearchState) -> list[Send]:
 
 
 def research_worker(state: dict) -> dict:
-    """Reduce-side input: one worker, one source, returns one finding."""
+    """Map: one worker, one source, returns one finding."""
     src = state["source"]
     try:
         result = search_source(src)
@@ -311,9 +317,9 @@ def research_worker(state: dict) -> dict:
     except SourceUnavailable as exc:
         # Partial-failure handling lives here: a dead source returns a
         # finding WITH an error, not an exception, so one bad source cannot
-        # fail the superstep - the reduce step downstream sees the error and
-        # decides what to do with it. SourceRateLimited is NOT caught: it
-        # propagates to the node's retry policy.
+        # fail the superstep - whatever reads `findings` next (the caller,
+        # or a reduce node you add) sees the error and decides what to do.
+        # SourceRateLimited is NOT caught: it propagates to the retry policy.
         return {"findings": [{"source": src, "error": str(exc)}]}
 
 

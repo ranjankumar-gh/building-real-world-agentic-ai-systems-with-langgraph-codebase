@@ -175,6 +175,7 @@ from atlas.context import BUDGET, select_docs, trim_history
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
 from atlas.memory import profile_ns, relevant_memories
+from atlas.naive import ChatModel
 from atlas.research import research_graph
 from atlas.state import AtlasState
 from atlas.tools import KnowledgeBaseUnavailable, text_of
@@ -452,7 +453,8 @@ def research(state: AtlasState) -> dict:
 
 
 def _make_builder(
-    triage_node, resolve_node: Callable[[AtlasState], dict] = answer
+    triage_node: Callable[[AtlasState], dict],
+    resolve_node: Callable[[AtlasState], dict] = answer,
 ) -> StateGraph:
     """Chapter 17, "Mounting the resolve agent": the wiring shared by the
     module-level `builder` below and every graph `build_graph` constructs -
@@ -536,7 +538,8 @@ def _make_builder(
 
 
 def build_graph(
-    model=None, resolve_node: Callable[[AtlasState], dict] | None = None
+    model: ChatModel | None = None,
+    resolve_node: Callable[[AtlasState], dict] | None = None,
 ) -> Pregel:
     """Chapter 17 adds `resolve_node`: the callable mounted as "answer"
     (`atlas/resolve.py`'s `make_resolve_node` builds one); None keeps the
