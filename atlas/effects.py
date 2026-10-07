@@ -13,8 +13,9 @@ real payment provider's `Idempotency-Key` header works.
 `atlas/graph.py`'s `refund` node imports `idempotency_key` and
 `charge_refund` from here and is the only caller. It passes the amount from
 state - the approved amount, after any edit at Chapter 11's approval gate -
-and the backend refuses an amount above the original charge with
-`RefundRefused`. That refusal is deterministic - asking again gets the same
+and the backend refuses with `RefundRefused` when that amount, added to what
+the ticket has already been refunded (on any thread), would exceed the
+original charge. That refusal is deterministic - asking again gets the same
 answer - so it is a `ValueError`, outside the refund node's
 `retry_on=(RefundError,)`: `refund_failed` runs after one attempt, with no
 retries.
@@ -59,12 +60,19 @@ class RefundRefused(ValueError):
 
 def charge_refund(key: str, ticket_id: str, amount: float) -> str:
     """Idempotent at the provider: a repeated key returns the first result
-    and does not charge again. Refuses more than the original charge."""
+    and does not charge again. Refuses more than the original charge, in
+    total: the key is per thread, so two threads refunding one ticket are
+    two keys, and the cap counts what was already refunded."""
     if key in _LEDGER:
         return _LEDGER[key]  # already charged - return prior result
     record = _REFUNDS[ticket_id]
-    if amount > record["amount"]:  # the provider's cap: never more than paid
-        raise RefundRefused(f"{amount:.2f} exceeds the original {record['amount']:.2f}")
+    refunded = record.get("refunded", 0.0)
+    if refunded + amount > record["amount"]:  # never more than paid, in total
+        raise RefundRefused(
+            f"{amount:.2f} plus {refunded:.2f} already refunded exceeds the "
+            f"original {record['amount']:.2f}"
+        )
+    record["refunded"] = refunded + amount
     record["status"] = "refunded"
     result = f"Refund of ${amount:.2f} issued for {ticket_id}."
     _LEDGER[key] = result  # dedup recorded atomically with the charge

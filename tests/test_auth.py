@@ -391,3 +391,47 @@ def test_a_customer_namespace_needs_an_explicit_grant() -> None:
     assert _store(granted, "put", ns) is False  # read-only, even with a grant
     assert _store(granted, "get", ("customer", "C-91", "profile")) is False
     assert _store(LEAD_USER, "get", ("containment", "agent-7")) is False
+
+
+# --- R106: a cron's payload is a run too; the metadata-shape gap ---------------
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"input": {"approval": {"decision": "approve"}}},
+        {"input": {"refund_done": True}},
+        {"command": {"goto": "refund"}},
+    ],
+)
+def test_a_non_approvers_cron_may_not_plant_or_steer(
+    action: str, payload: dict
+) -> None:
+    ctx = _Ctx(AGENT_USER, action)
+    ctx.resource = "crons"
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        asyncio.run(crons_are_scoped_to_their_owner(ctx, {"payload": payload}))
+
+    assert excinfo.value.status_code == 403
+
+
+def test_an_ordinary_cron_create_and_update_are_allowed() -> None:
+    create = {"payload": {"input": {"sample_rate": 0.1}}, "schedule": "0 * * * *"}
+    update = {"cron_id": "c-1", "enabled": False, "payload": None}
+
+    for action, value in (("create", create), ("update", update)):
+        ctx = _Ctx(AGENT_USER, action)
+        ctx.resource = "crons"  # a cron update is not a thread state write
+        result = asyncio.run(crons_are_scoped_to_their_owner(ctx, value))
+        assert result == {"owner": "agent-7"}
+
+
+def test_a_state_write_carrying_empty_metadata_passes_the_hook() -> None:
+    """Documented gap (defense in depth only): the hook tells a state write
+    from a metadata patch by the `metadata` key alone. `refund`'s audit-row
+    check is what holds if a runtime sends one."""
+    value = {"thread_id": "t-1", "metadata": {}}
+
+    assert _hook(AGENT_USER, "update", value) == {"owner": "agent-7"}

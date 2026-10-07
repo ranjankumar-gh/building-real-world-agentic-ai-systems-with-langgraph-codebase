@@ -113,10 +113,16 @@ async def deny_by_default(ctx: Auth.types.AuthContext, value: Any) -> bool:
     return False
 
 
+def _run_body(value: Any) -> dict:
+    """The run a request asks for: a run's body arrives as `kwargs`, a
+    cron's as `payload` (the SDK's RunsCreate and CronsCreate)."""
+    return value.get("kwargs") or value.get("payload") or {}
+
+
 def _steers_the_graph(ctx: Auth.types.AuthContext, value: Any) -> bool:
     """A run whose command carries `goto` or `update` moves the graph or
     writes its state from outside: only an approver may send one."""
-    command = (value.get("kwargs") or {}).get("command") or {}
+    command = _run_body(value).get("command") or {}
     return bool(command.get("goto") or command.get("update")) and (
         role_of(ctx.user) not in APPROVER_ROLES
     )
@@ -130,7 +136,7 @@ def _plants_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     `approval`, the refund's `refund_done`, anything named audit* - or a
     thread created with `supersteps` (state applied with no run at all),
     from a non-approver."""
-    run_input = (value.get("kwargs") or {}).get("input")
+    run_input = _run_body(value).get("input")
     keys = set(run_input) if isinstance(run_input, dict) else set()
     planted = keys & GRAPH_OWNED_KEYS or any(k.startswith("audit") for k in keys)
     return bool(planted or value.get("supersteps")) and (
@@ -151,12 +157,16 @@ def _writes_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     this same shape.
 
     This test rests on the runtime's request shape, verified by probe on
-    langgraph-api 0.14.0 with langgraph-runtime-inmem 0.34.2 only. A runtime
-    that sends `metadata` (even `{}`) with a state write would get past it.
-    It is defense in depth: `refund` verifies the gate's own audit row, so a
-    state write that got through would still charge nothing."""
+    langgraph-api 0.14.0 with langgraph-runtime-inmem 0.34.2 only. Any value
+    that carries a `metadata` key passes it - a state write that arrives as
+    `{"thread_id": ..., "metadata": {}}` is let through as if it were a
+    metadata patch - so a runtime that sends `metadata` with a state write
+    gets past it. It is defense in depth only: `refund` verifies the gate's
+    own audit row, so a state write that got through would still charge
+    nothing."""
     return (
-        ctx.action == "update"
+        getattr(ctx, "resource", "threads") == "threads"  # a cron update is not one
+        and ctx.action == "update"
         and "metadata" not in value
         and not value.get("action")
         and role_of(ctx.user) not in APPROVER_ROLES
@@ -175,9 +185,10 @@ def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str] | None:
     else sees only what they own. Ownership is the server's to set - it
     stamps `owner` on create - and no caller, approver or not, may change it
     afterwards."""
-    if ctx.action == "create_run" and _steers_the_graph(ctx, value):  # <1>
-        raise _refuse("only an approver may send goto or update")
-    if ctx.action in ("create", "create_run") and _plants_state(ctx, value):
+    sends_a_run = ctx.action in ("create", "create_run") or "payload" in value
+    if sends_a_run and _steers_the_graph(ctx, value):
+        raise _refuse("only an approver may send goto or update")  # <1>
+    if sends_a_run and _plants_state(ctx, value):
         raise _refuse("only an approver may set graph-owned state")
     if ctx.action == "update" and "owner" in (value.get("metadata") or {}):
         raise _refuse("thread ownership is set by the server")  # <2>
@@ -196,7 +207,9 @@ def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str] | None:
 #    request body to this hook as value["kwargs"] (langgraph-runtime-inmem
 #    0.34.2, checked by probe); a runtime that does not leaves `kwargs`
 #    empty, and the checks inside the graph still hold. The same goes for
-#    `_plants_state` and `_writes_state`.
+#    `_plants_state` and `_writes_state`. A cron carries its run as
+#    `payload` (crons are stamped and filtered by `_owned` too), so both
+#    checks read it there as well.
 # 2. Without this, a thread owner could hand a thread to someone else by
 #    patching `metadata.owner`, and the thread would show up in their view.
 # 3. No filter at all. The owner stamp still records who opened the thread.

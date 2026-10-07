@@ -274,8 +274,8 @@ def approve(**extra: object) -> Command:
 @pytest.fixture
 def charged(monkeypatch) -> list:
     """Every (ticket, amount) actually charged. The fake keeps the
-    provider's cap per ticket (T-1001 was paid 49, T-2002 was paid 300) and
-    its dedupe on the idempotency key."""
+    provider's cumulative cap per ticket (T-1001 was paid 49, T-2002 was
+    paid 300) and its dedupe on the idempotency key."""
     from atlas.effects import RefundRefused
 
     paid_for = {"T-1001": 49.0, "T-2002": 300.0}
@@ -286,7 +286,8 @@ def charged(monkeypatch) -> list:
     def fake_charge(key: str, ticket_id: str, amount: float) -> str:
         if key in ledger:  # the provider's dedupe, as in atlas/effects.py
             return ledger[key]
-        if amount > paid_for[ticket_id]:
+        refunded = sum(a for t, a in done if t == ticket_id)  # cumulative cap
+        if refunded + amount > paid_for[ticket_id]:
             raise RefundRefused(f"{amount:.2f} exceeds the original")
         done.append((ticket_id, amount))
         ledger[key] = f"Refund of ${amount:.2f} issued for {ticket_id}."
@@ -883,3 +884,76 @@ def test_earlier_review_probes_still_charge_nothing(charged, probe):
     assert out.get("refund_done") is not True
     assert [r for r in _rows(g) if r.get("outcome") == "charged"] == []
     assert all(r.get("refused") or r.get("outcome") for r in _rows(g))
+
+
+# --- R106: the cap is cumulative per ticket; a re-approval cannot re-price --
+
+
+def test_two_threads_cannot_refund_more_than_was_paid_in_total(monkeypatch):
+    """R105 M1, with the real seeded provider: T-1001 was paid 49. A lead
+    genuinely approves $30 on each of two threads. The idempotency key is
+    per thread, so the provider sees two refunds; the cumulative cap
+    refuses the second, and the node compensates with refund_failed."""
+    from atlas import effects  # conftest gives each test the seeded provider
+
+    monkeypatch.setattr(graph_module, "charge_refund", effects.charge_refund)
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: SimpleNamespace(route="refund")
+    )
+    g = _served()
+    ticket = {**TICKET, "amount": 30.0}
+    outs = []
+    for thread in ("srv-cap-d1", "srv-cap-d2"):
+        config = _cfg(thread, LEAD)
+        _start(g, config, ticket)
+        outs.append(g.invoke(approve(shown={**SHOWN, "amount": 30.0}), config))
+
+    assert outs[0]["refund_done"] is True
+    assert outs[1].get("refund_done") is not True
+    assert outs[1]["error"] == "refund failed; needs manual review"
+    assert effects._REFUNDS["T-1001"]["refunded"] == 30.0
+    assert [r[3] for r in _refund_rows(g, "C-90")] == [
+        "charged",
+        "provider refused: 30.00 plus 30.00 already refunded exceeds the "
+        "original 49.00",
+    ]
+
+
+def test_a_reapproval_at_a_new_amount_after_a_charge_is_refused(charged):
+    """R105 M2: on one thread, $10 is charged; a new turn asks for $20 and
+    the lead approves it. The provider would replay the $10 charge (same
+    thread, same ticket), so refund refuses and escalates instead of
+    reporting a refund that did not happen."""
+    g = _served()
+    config = _cfg("srv-reprice", LEAD)
+    _start(g, config)
+    g.invoke(approve(), config)
+    assert charged == [("T-1001", 10.0)]
+
+    _start(g, config, {**TICKET, "amount": 20.0})
+    out = g.invoke(approve(shown={**SHOWN, "amount": 20.0}), config)
+
+    assert charged == [("T-1001", 10.0)]
+    assert out["messages"][-1].content == (
+        "Refund not issued: refused: already refunded 10.00"
+    )
+    assert _refund_rows(g, "C-90") == [
+        ("lead-3", "T-1001", 10.0, "charged"),
+        ("lead-3", "T-1001", None, "refused: already refunded 10.00"),
+    ]
+
+
+def test_a_replay_at_the_same_amount_records_the_amount_charged(charged):
+    """The "replayed" row names the amount the provider actually charged."""
+    g = _served()
+    config = _cfg("srv-replay-amount", LEAD)
+    _start(g, config)
+    g.invoke(approve(), config)
+    _start(g, config)
+    g.invoke(approve(), config)
+
+    assert charged == [("T-1001", 10.0)]
+    assert _refund_rows(g, "C-90") == [
+        ("lead-3", "T-1001", 10.0, "charged"),
+        ("lead-3", "T-1001", 10.0, "replayed: already charged"),
+    ]

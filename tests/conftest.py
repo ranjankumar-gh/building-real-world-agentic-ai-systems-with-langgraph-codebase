@@ -83,6 +83,21 @@ if OFFLINE:
     socket.getaddrinfo = getaddrinfo  # type: ignore[assignment]
 
 
+@pytest.fixture(autouse=True)
+def fresh_refund_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test starts with Chapter 10's seeded provider as seeded.
+
+    The provider's cap is cumulative per ticket (never more than paid, in
+    total), so a refund one test makes would otherwise count against the
+    next test's refund of the same seeded ticket."""
+    import copy
+
+    from atlas import effects
+
+    monkeypatch.setattr(effects, "_REFUNDS", copy.deepcopy(effects._REFUNDS))
+    monkeypatch.setattr(effects, "_LEDGER", {})
+
+
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     if not OFFLINE:
         terminalreporter.write_line("network guard: off (LANGSMITH_API_KEY is set)")

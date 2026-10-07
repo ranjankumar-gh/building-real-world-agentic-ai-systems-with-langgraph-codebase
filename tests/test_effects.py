@@ -142,3 +142,22 @@ def test_refund_refused_is_outside_the_refund_nodes_retry_on():
     """A deterministic refusal must not match retry_on=(RefundError,)."""
     assert issubclass(RefundRefused, ValueError)
     assert not issubclass(RefundRefused, RefundError)
+
+
+def test_the_cap_counts_what_the_ticket_was_already_refunded():
+    """R106: the key is per thread, so two threads refunding one ticket
+    reach the provider as two refunds. Never more than paid, in total."""
+    from atlas import effects
+
+    effects._REFUNDS["T-cum-1"] = {"status": "pending", "amount": 49.0}
+    first = idempotency_key("thread-cum-a", "T-cum-1")
+    second = idempotency_key("thread-cum-b", "T-cum-1")
+
+    charge_refund(first, "T-cum-1", 30.0)
+    with pytest.raises(RefundRefused, match="30.00 already refunded"):
+        charge_refund(second, "T-cum-1", 30.0)
+    result = charge_refund(second, "T-cum-1", 19.0)  # the remainder is fine
+
+    assert result == "Refund of $19.00 issued for T-cum-1."
+    assert effects._REFUNDS["T-cum-1"]["refunded"] == 49.0
+    assert second in effects._LEDGER

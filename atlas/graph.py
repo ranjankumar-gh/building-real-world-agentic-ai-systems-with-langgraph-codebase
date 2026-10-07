@@ -543,6 +543,15 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
             "amount": amount,
             "approval_key": key,
         }
+        earlier = (
+            charged_rows(
+                runtime.store, customer_id, thread=thread_id, ticket=ticket.get("id")
+            )
+            if refusal is None and runtime.store is not None
+            else []
+        )  # <7>
+        if earlier and earlier[0]["amount"] != amount:
+            refusal = f"refused: already refunded {earlier[0]['amount']:.2f}"
         if refusal is not None:
             _audit(runtime, config, customer_id,
                    {**row, "amount": None, "outcome": refusal}, event="refund")
@@ -550,9 +559,6 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
                 update={"messages": [AIMessage(f"Refund not issued: {refusal}")]},
                 goto="escalate",
             )
-        replayed = runtime.store is not None and charged_rows(
-            runtime.store, customer_id, thread=thread_id, ticket=ticket.get("id")
-        )  # <7>
         try:
             out = refund({**state, "ticket": {**ticket, "amount": amount}}, config)
         except RefundRefused as exc:  # <8>
@@ -563,7 +569,7 @@ def make_authorized_refund(served: bool) -> Callable[..., dict | Command]:
             _audit(runtime, config, customer_id,
                    {**row, "outcome": f"failed: {exc}"}, event="refund")
             raise  # retried by the node's RetryPolicy, then refund_failed
-        outcome = "replayed: already charged" if replayed else "charged"
+        outcome = "replayed: already charged" if earlier else "charged"
         _audit(runtime, config, customer_id, {**row, "outcome": outcome},
                event="refund")  # <9>
         return {**out, "error": None}  # a stale error does not outlive a charge
@@ -627,9 +633,12 @@ def row_refusal(record: dict | None, ticket: dict, thread_id: str | None) -> str
 #    role and by THIS run's identity. One charge per row: an approval that
 #    already has a "charged" row authorizes nothing more. The refusal goes
 #    in a message, not `error`: the gate may be refusing in the same step.
-# 7. A fork that passes the gate again writes a new approval, but the
-#    provider dedupes on thread + ticket and charges nothing new; the row
-#    says "replayed", so a reader summing "charged" rows counts money once.
+# 7. The provider dedupes on thread + ticket, so a second approval on this
+#    thread for this ticket can never move money again. At the same amount
+#    (a fork re-approving what was charged) the row says "replayed", with
+#    the amount actually charged, and a reader summing "charged" rows counts
+#    the money once. At a different amount it is refused and escalated:
+#    the provider would replay the earlier charge, not the one approved.
 # 8. The provider's cap (`RefundRefused`) can never succeed on retry, so the
 #    node compensates on the spot with `refund_failed`, the same result the
 #    error handler gives a `RefundError` once its retries run out.
