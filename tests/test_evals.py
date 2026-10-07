@@ -19,6 +19,7 @@ Chapter 27, "Capstone", adds `checkins_sent_only_if_approved` and
 for real below via a genuine suspend/resume cycle through
 `atlas.sla_watch.build_sla_watch_graph()`."""
 
+import copy
 import os
 from types import SimpleNamespace
 from typing import Any
@@ -34,6 +35,8 @@ from openevals.llm import create_llm_as_judge
 from openevals.prompts import CORRECTNESS_PROMPT
 
 import atlas.agent as agent_module
+import atlas.effects as effects_module
+import atlas.tools as tools_module
 from atlas import evals as evals_module
 from atlas import graph as graph_module
 from atlas import monitor as monitor_module
@@ -458,7 +461,14 @@ def test_the_research_example_catches_the_opening_hooks_redundant_hop(monkeypatc
 def _scripted_resolved(monkeypatch, route: str, script: list[AIMessage]) -> None:
     """Chapter 17's real build_resolved_graph - the whole RESOLVE_MIDDLEWARE
     stack - with triage forced to `route` and the resolve agent's model
-    scripted."""
+    scripted. The seeded ticket and refund backends are swapped for copies,
+    so a test that closes T-1001 or refunds it leaves the seed as it was
+    for every other test module."""
+    monkeypatch.setattr(tools_module, "_TICKETS", copy.deepcopy(tools_module._TICKETS))
+    monkeypatch.setattr(
+        effects_module, "_REFUNDS", copy.deepcopy(effects_module._REFUNDS)
+    )
+    monkeypatch.setattr(effects_module, "_LEDGER", {})
     monkeypatch.setattr(
         graph_module, "classify", lambda messages: SimpleNamespace(route=route)
     )
