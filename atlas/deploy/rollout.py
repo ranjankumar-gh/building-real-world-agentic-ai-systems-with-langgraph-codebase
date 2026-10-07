@@ -1,6 +1,6 @@
-"""Chapter 22, "Deployment and Scaling" - the drain-migrate-deploy script.
+"""Chapter 22, "Deployment and Scaling" - the drain-and-deploy script.
 
-See "The drain-migrate-deploy script". The Agent Server drains itself: on
+See "The drain-and-deploy script". The Agent Server drains itself: on
 SIGTERM it stops taking work from the shared run queue and lets in-flight
 runs finish for up to `BG_JOB_SHUTDOWN_GRACE_PERIOD_SECS` (180 s in the
 server version this chapter checked, langgraph-api 0.14.0). A run still

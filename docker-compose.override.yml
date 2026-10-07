@@ -17,4 +17,4 @@ services:
     stop_grace_period: 200s # longer than the server's grace, or runs are killed
   langgraph-postgres:
     deploy:
-      replicas: 1 # Postgres is NOT replicated the same way - see the chapter's note <1>
+      replicas: 1 # Postgres is NOT replicated the same way - see the chapter's note <4>

@@ -1,6 +1,6 @@
 """Chapter 22, "Deployment and Scaling" - atlas/deploy/rollout.py.
 
-See "The drain-migrate-deploy script". `drain_replica`/`rolling_deploy` are
+See "The drain-and-deploy script". `drain_replica`/`rolling_deploy` are
 orchestration logic over a `fleet` interface (`remove`/`terminate`/
 `is_stopped`/`is_ready`/`add`), not a live fleet - there is no real load
 balancer or orchestrator in this repo to drive, so these tests exercise the

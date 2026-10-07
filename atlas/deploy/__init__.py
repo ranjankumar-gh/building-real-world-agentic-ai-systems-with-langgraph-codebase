@@ -5,7 +5,7 @@ assembly (the mounted resolve agent and its gates, with the context built
 from the authenticated identity) and the `monitor` graph, both compiled
 without a checkpointer or store because the Agent Server supplies them.
 `rollout.py` holds `drain_replica`/`rolling_deploy`, the fleet-level
-drain-migrate-deploy script around the Agent Server's own SIGTERM drain
+drain-and-deploy script around the Agent Server's own SIGTERM drain
 (Chapter 10's `RunControl.request_drain()` stays the mechanism for a run you
 own in your own process). `schedule.py` holds the Agent Server cron and
 webhook wiring for Chapter 21's online quality monitor and the Chapter 17
