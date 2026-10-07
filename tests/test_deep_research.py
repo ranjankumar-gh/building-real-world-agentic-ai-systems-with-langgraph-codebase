@@ -246,6 +246,8 @@ def test_a_safe_id_cannot_prefix_match_a_longer_id():
 
 _lookups: Counter = Counter()
 _fail_once: set[str] = set()
+_notes: Counter = Counter()
+_fail_note_once: set[str] = set()
 
 
 @tool
@@ -256,6 +258,17 @@ def flaky_lookup(source: str) -> str:
         _fail_once.discard(source)
         raise RuntimeError(f"source crashed: {source}")
     return f"finding for {source}"
+
+
+@tool
+def record_note(source: str) -> str:
+    """Record that a source was looked up; raises once for a source in
+    _fail_note_once, so a sub-agent can crash AFTER its lookup step."""
+    _notes[source] += 1
+    if source in _fail_note_once:
+        _fail_note_once.discard(source)
+        raise RuntimeError(f"note crashed: {source}")
+    return f"noted {source}"
 
 
 def _call(name: str, args: dict, call_id: str) -> dict:
@@ -288,7 +301,16 @@ class _ResearchModel(BaseChatModel):
                     "", tool_calls=[_call("flaky_lookup", {"source": src}, src)]
                 )
             elif seen == ["flaky_lookup"]:
-                args = {"file_path": f"/findings/{src}.md", "content": last.content}
+                msg = AIMessage(
+                    "", tool_calls=[_call("record_note", {"source": src}, src)]
+                )
+            elif seen == ["flaky_lookup", "record_note"]:
+                lookup = next(
+                    m
+                    for m in messages
+                    if isinstance(m, ToolMessage) and m.name == "flaky_lookup"
+                )
+                args = {"file_path": f"/findings/{src}.md", "content": lookup.content}
                 msg = AIMessage("", tool_calls=[_call("write_file", args, src)])
             else:
                 msg = AIMessage(f"done {src}")
@@ -314,7 +336,7 @@ def _research_agent(backend=None, store=None):
         "name": "researcher",
         "description": "Investigates one source.",
         "system_prompt": "Investigate the assigned source using flaky_lookup.",
-        "tools": [flaky_lookup],
+        "tools": [flaky_lookup, record_note],
     }
     extra = {"backend": backend} if backend is not None else {}
     return create_deep_agent(
@@ -357,6 +379,28 @@ def test_parallel_task_calls_are_separate_sends_and_resume_reruns_only_the_faile
 
     result = agent.invoke(None, config)
     assert _lookups == Counter({"s1": 1, "s2": 2, "s3": 1})
+    assert result["messages"][-1].content == "report"
+
+
+def test_a_resumed_sub_agent_continues_after_its_last_completed_step():
+    """The sub-agent checkpoints its own steps into the parent's checkpointer,
+    under the `task` call's namespace. It crashes AFTER its lookup; the
+    resume finishes it without repeating the lookup."""
+    _lookups.clear()
+    _notes.clear()
+    _fail_once.clear()
+    _fail_note_once.clear()
+    _fail_note_once.add("s2")
+    agent = _research_agent()
+    config = {"configurable": {"thread_id": "t-subagent-resume"}}
+
+    with pytest.raises(RuntimeError, match="note crashed: s2"):
+        agent.invoke({"messages": [{"role": "user", "content": "report"}]}, config)
+    assert _lookups == Counter({"s1": 1, "s2": 1, "s3": 1})
+
+    result = agent.invoke(None, config)
+    assert _lookups == Counter({"s1": 1, "s2": 1, "s3": 1})  # lookup not repeated
+    assert _notes == Counter({"s1": 1, "s2": 2, "s3": 1})  # only the crashed step
     assert result["messages"][-1].content == "report"
 
 
