@@ -247,3 +247,28 @@ def test_a_resume_only_command_and_a_lead_steering_are_allowed() -> None:
     assert asyncio.run(threads_are_scoped_to_their_owner(lead, steer)) == {
         "owner": "lead-3"
     }
+
+
+def test_a_non_approver_may_not_write_thread_state() -> None:
+    """R104: the state API is a write path that is not a run. The hook sees
+    only the thread id for a state write, so a non-approver's is refused."""
+    ctx = _Ctx(_User("agent-7", ["role:support_agent"]), "update")
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        asyncio.run(threads_are_scoped_to_their_owner(ctx, {"thread_id": "t-1"}))
+
+    assert excinfo.value.status_code == 403
+
+
+def test_a_metadata_patch_a_cancel_and_a_lead_state_write_are_allowed() -> None:
+    agent = _Ctx(_User("agent-7", ["role:support_agent"]), "update")
+    lead = _Ctx(_User("lead-3", ["role:support_lead"]), "update")
+
+    for ctx, value in [
+        (agent, {"thread_id": "t-1", "metadata": {"topic": "billing"}}),
+        (agent, {"thread_id": "t-1", "action": "interrupt"}),
+        (lead, {"thread_id": "t-1"}),
+    ]:
+        assert asyncio.run(threads_are_scoped_to_their_owner(ctx, value)) == {
+            "owner": ctx.user.identity
+        }

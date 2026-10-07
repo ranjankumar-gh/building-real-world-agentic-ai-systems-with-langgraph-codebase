@@ -122,22 +122,43 @@ def _steers_the_graph(ctx: Auth.types.AuthContext, value: Any) -> bool:
     )
 
 
+def _writes_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
+    """A threads "update" that is a state write, from a non-approver.
+
+    The hook never sees the values written: the in-memory runtime passes a
+    state write as ThreadsUpdate(thread_id=...) alone, so a write that would
+    touch `ticket`, `approval` or `refund_done` cannot be told from any other.
+    A metadata patch carries `metadata`, a run cancel carries `action`; any
+    other update is a state write, and only an approver may make one."""
+    return (
+        ctx.action == "update"
+        and "metadata" not in value
+        and not value.get("action")
+        and role_of(ctx.user) not in APPROVER_ROLES
+    )
+
+
 def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str]:
     """Stamp a new resource with its owner, then filter every access to it."""
     if ctx.action == "create_run" and _steers_the_graph(ctx, value):  # <1>
         raise Auth.exceptions.HTTPException(
             status_code=403, detail="only an approver may send goto or update"
         )
+    if _writes_state(ctx, value):
+        raise Auth.exceptions.HTTPException(
+            status_code=403, detail="only an approver may write thread state"
+        )
     if ctx.action in ("create", "create_run"):
         value.setdefault("metadata", {})["owner"] = ctx.user.identity
     return {"owner": ctx.user.identity}
 
 
-# 1. Defense in depth, not the control: `refund` refuses a non-approver on
-#    its own (atlas/graph.py). The in-memory runtime passes the run's
-#    request body to this hook as value["kwargs"] (langgraph-runtime-inmem
-#    0.34.2, checked by probe); a runtime that does not leaves `kwargs`
-#    empty, and the check inside the graph still holds.
+# 1. Defense in depth, not the control: the gate binds a decision to what
+#    the approver was shown and `refund` refuses a non-approver on its own
+#    (atlas/graph.py). The in-memory runtime passes the run's request body to
+#    this hook as value["kwargs"] (langgraph-runtime-inmem 0.34.2, checked by
+#    probe); a runtime that does not leaves `kwargs` empty, and the checks
+#    inside the graph still hold. The same goes for `_writes_state`.
 
 
 @auth.on.threads

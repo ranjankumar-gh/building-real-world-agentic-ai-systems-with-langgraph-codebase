@@ -164,11 +164,10 @@ def test_record_approval_is_append_only():
     The same decision recorded twice is two rows: a re-executed gate logs
     its own."""
     store = InMemoryStore()
-    ticket = {"id": "T-9", "customer_id": "C-1"}
     first = {"decision": "approve", "by": "lead-3", "at": "t0", "amount": 49.0}
 
-    k1 = record_approval(store, ticket, "t-1", "cp-1", first)
-    k2 = record_approval(store, ticket, "t-1", "cp-1", first)
+    k1 = record_approval(store, "C-1", "t-1", "cp-1", {**first, "ticket_id": "T-9"})
+    k2 = record_approval(store, "C-1", "t-1", "cp-1", {**first, "ticket_id": "T-9"})
 
     assert k1 != k2
     assert k1.startswith("approval:t-1:cp-1:")
@@ -176,6 +175,7 @@ def test_record_approval_is_append_only():
     for key in (k1, k2):
         assert store.get(audit_ns("C-1"), key).value == {
             **first,
+            "ticket_id": "T-9",
             "event": "approval",
             "ticket": "T-9",
             "thread": "t-1",
@@ -251,7 +251,7 @@ def test_a_fork_from_the_paused_checkpoint_appends_never_overwrites(monkeypatch)
     assert rows[0].value["amount"] == 49.0 and rows[1].value["amount"] is None
 
 
-# --- R94/R101: the served build fails closed, at the gate and at the charge -
+# --- R94/R101/R104: the served build fails closed, at the gate and the charge
 
 
 class _User:
@@ -262,27 +262,35 @@ class _User:
 
 AGENT = _User("agent-7", "support_agent")
 LEAD = _User("lead-3", "support_lead")
-TICKET = {"id": "T-1001", "amount": 49.0, "customer_id": "C-90"}
+TICKET = {"id": "T-1001", "amount": 10.0, "customer_id": "C-90"}
+OTHER = {"id": "T-2002", "amount": 300.0, "customer_id": "C-91"}
+SHOWN = {"ticket_id": "T-1001", "amount": 10.0}  # what the interrupt showed
+
+
+def approve(**extra: object) -> Command:
+    return Command(resume={"type": "approve", "shown": SHOWN, **extra})
 
 
 @pytest.fixture
 def charged(monkeypatch) -> list:
-    """Every amount actually charged; the provider's real cap still applies."""
-    from atlas.effects import _REFUNDS, RefundRefused
+    """Every (ticket, amount) actually charged. The fake keeps the
+    provider's cap per ticket: T-1001 was paid 49, T-2002 was paid 300."""
+    from atlas.effects import RefundRefused
 
-    paid: list = []
+    paid_for = {"T-1001": 49.0, "T-2002": 300.0}
+    done: list = []
 
     def fake_charge(key: str, ticket_id: str, amount: float) -> str:
-        if amount > _REFUNDS[ticket_id]["amount"]:
+        if amount > paid_for[ticket_id]:
             raise RefundRefused(f"{amount:.2f} exceeds the original")
-        paid.append(amount)
+        done.append((ticket_id, amount))
         return f"Refund of ${amount:.2f} issued for {ticket_id}."
 
     monkeypatch.setattr(graph_module, "charge_refund", fake_charge)
     monkeypatch.setattr(
         graph_module, "classify", lambda messages: SimpleNamespace(route="refund")
     )
-    return paid
+    return done
 
 
 def _served():
@@ -300,17 +308,22 @@ def _cfg(thread_id: str, user: object | None) -> dict:
     return {"configurable": conf}
 
 
-def _start(g, config: dict) -> None:
+def _start(g, config: dict, ticket: dict = TICKET) -> None:
     g.invoke(
-        {"messages": [{"role": "user", "content": "refund please"}], "ticket": TICKET},
+        {"messages": [{"role": "user", "content": "refund please"}], "ticket": ticket},
         config,
     )
 
 
-def _rows(g) -> list[dict]:
-    rows = g.store.search(audit_ns("C-90"), limit=100)
+def _rows(g, customer_id: str = "C-90", event: str | None = None) -> list[dict]:
+    rows = g.store.search(audit_ns(customer_id), limit=100)
     return sorted(
-        (r.value for r in rows if r.value.get("event") == "approval"),
+        (
+            r.value
+            for r in rows
+            if r.value.get("event") in ("approval", "refund")
+            and (event is None or r.value["event"] == event)
+        ),
         key=lambda v: v["at"],
     )
 
@@ -322,7 +335,7 @@ def test_a_forged_by_from_a_non_approver_is_refused_and_nothing_is_charged(
     config = _cfg("srv-forged", AGENT)
     _start(g, config)
 
-    out = g.invoke(Command(resume={"type": "approve", "by": "ceo@corp"}), config)
+    out = g.invoke(approve(by="ceo@corp"), config)
 
     assert charged == []
     assert out.get("refund_done") is not True
@@ -342,8 +355,8 @@ def test_goto_refund_by_a_non_approver_is_refused_at_the_charge(charged):
 
     assert charged == []
     assert out.get("refund_done") is not True
-    [row] = _rows(g)
-    assert row["by"] == "agent-7" and "may not approve" in row["refused"]
+    [row] = _rows(g, event="refund")
+    assert row["by"] == "agent-7" and "may not approve" in row["outcome"]
 
 
 def test_resume_plus_goto_by_a_non_approver_is_refused_twice(charged):
@@ -354,13 +367,13 @@ def test_resume_plus_goto_by_a_non_approver_is_refused_twice(charged):
     _start(g, config)
 
     out = g.invoke(
-        Command(resume={"type": "approve", "by": "ceo"}, goto="refund"), config
+        Command(resume={"type": "approve", "shown": SHOWN}, goto="refund"), config
     )
 
     assert charged == []
     assert out.get("refund_done") is not True
     rows = _rows(g)
-    assert rows and all(r["refused"] and r["by"] == "agent-7" for r in rows)
+    assert len(rows) == 2 and all(r["by"] == "agent-7" for r in rows)
 
 
 def test_goto_with_a_forged_amount_by_a_non_approver_charges_nothing(charged):
@@ -376,33 +389,32 @@ def test_goto_with_a_forged_amount_by_a_non_approver_charges_nothing(charged):
 
     assert charged == []
     assert out.get("refund_done") is not True
-    [row] = _rows(g)
-    assert row["amount"] is None and row["refused"]
+    [row] = _rows(g, event="refund")
+    assert row["amount"] is None and "may not approve" in row["outcome"]
 
 
-def test_a_lead_forging_the_approval_and_amount_hits_the_cap(charged):
-    """A lead passes the role check, but refund charges only the approval's
-    amount, and the provider's cap refuses 9999. (The paused gate re-runs
-    in the same step, so the run raises RefundRefused rather than
-    finishing through refund_failed; either way nothing is charged.)"""
+def test_an_over_cap_charge_routes_to_refund_failed(charged):
+    """M2: a lead's forged approval for 9999 reaches the provider, which
+    refuses; the node compensates with refund_failed and logs the refusal."""
     g = _served()
     config = _cfg("srv-lead-9999", LEAD)
     _start(g, config)
-    forged = {"decision": "approve", "by": "lead-3", "at": "t", "amount": 9999.0}
+    forged = {
+        "decision": "approve",
+        "by": "lead-3",
+        "at": "t",
+        "amount": 9999.0,
+        "ticket_id": "T-1001",
+        "customer_id": "C-90",
+    }
 
-    from atlas.effects import RefundRefused
-
-    with pytest.raises(RefundRefused, match="9999.00 exceeds"):
-        g.invoke(
-            Command(
-                update={"ticket": {**TICKET, "amount": 9999.0}, "approval": forged},
-                goto="refund",
-            ),
-            config,
-        )
+    out = g.invoke(Command(update={"approval": forged}, goto="refund"), config)
 
     assert charged == []
-    assert g.get_state(config).values.get("refund_done") is not True
+    assert out.get("refund_done") is not True
+    assert out["error"] == "refund failed; needs manual review"
+    [row] = _rows(g, event="refund")
+    assert row["by"] == "lead-3" and row["outcome"].startswith("provider refused")
 
 
 def test_goto_refund_by_a_lead_without_an_approval_charges_nothing(charged):
@@ -413,34 +425,41 @@ def test_goto_refund_by_a_lead_without_an_approval_charges_nothing(charged):
     g.invoke(Command(goto="refund"), config)
 
     assert charged == []
-    [row] = _rows(g)
-    assert row["refused"] == "refused: no approved amount for this refund"
+    [row] = _rows(g, event="refund")
+    assert row["outcome"] == "refused: no approved amount for this refund"
 
 
-def test_a_fresh_thread_goto_refund_charges_nothing(charged):
-    """Probe G: a brand-new thread routed straight to refund. The goto runs
-    beside the normal START path; refund refuses and escalates (which
-    replaces the ticket), and the START path then fails on the escalated
-    ticket. What matters here: nothing is charged and the refusal is on
-    record."""
+def test_a_fresh_thread_goto_ends_cleanly_and_does_not_wedge_the_thread(charged):
+    """Probe G / M1: a brand-new thread routed straight to refund. Refund
+    refuses and escalates; the gate on the START path finds the escalated
+    ticket and ends cleanly. New input afterwards runs normally, and a
+    lead's echoed approve charges exactly what was shown."""
     g = _served()
-    config = _cfg("srv-fresh", AGENT)
+    agent_cfg = _cfg("srv-fresh", AGENT)
 
-    with pytest.raises(KeyError):
-        g.invoke(
-            Command(
-                update={
-                    "messages": [{"role": "user", "content": "refund"}],
-                    "ticket": {**TICKET, "amount": 500.0},
-                },
-                goto="refund",
-            ),
-            config,
-        )
+    g.invoke(
+        Command(
+            update={
+                "messages": [{"role": "user", "content": "refund"}],
+                "ticket": {**TICKET, "amount": 500.0},
+            },
+            goto="refund",
+        ),
+        agent_cfg,
+    )
 
     assert charged == []
-    [row] = _rows(g)
-    assert row["by"] == "agent-7" and "may not approve" in row["refused"]
+    assert g.get_state(agent_cfg).next == ()
+    [refused] = _rows(g, event="refund")
+    assert refused["by"] == "agent-7" and "may not approve" in refused["outcome"]
+
+    lead_cfg = _cfg("srv-fresh", LEAD)
+    _start(g, lead_cfg)
+    assert g.get_state(lead_cfg).next == ("approval_gate",)
+    out = g.invoke(approve(), lead_cfg)
+
+    assert charged == [("T-1001", 10.0)]
+    assert out["refund_done"] is True
 
 
 def test_the_served_build_with_no_identity_fails_closed(charged):
@@ -450,7 +469,7 @@ def test_the_served_build_with_no_identity_fails_closed(charged):
     config = {"configurable": {"thread_id": "srv-no-identity"}}
     _start(g, config)
 
-    out = g.invoke(Command(resume={"type": "approve", "by": "ceo"}), config)
+    out = g.invoke(approve(by="ceo"), config)
 
     assert charged == []
     assert out.get("refund_done") is not True
@@ -459,23 +478,101 @@ def test_the_served_build_with_no_identity_fails_closed(charged):
     assert row["refused"] == "refused: no authenticated approver"
 
 
-def test_an_authenticated_lead_is_charged_the_approved_amount(charged):
+def test_a_lead_edit_charges_the_approved_amount_and_logs_the_charge(charged):
+    """R104/I1: a success writes its own row, with who charged what."""
     g = _served()
     config = _cfg("srv-lead", LEAD)
     _start(g, config)
 
     out = g.invoke(
-        Command(resume={"type": "edit", "amount": 20.0, "by": "ceo"}), config
+        Command(resume={"type": "edit", "amount": 8.0, "by": "ceo", "shown": SHOWN}),
+        config,
     )
 
-    assert charged == [20.0]
+    assert charged == [("T-1001", 8.0)]
     assert out["refund_done"] is True
+    [approval] = _rows(g, event="approval")
+    assert approval["by"] == "lead-3" and approval["amount"] == 8.0
+    assert approval["ticket_id"] == "T-1001" and approval["customer_id"] == "C-90"
+    assert "refused" not in approval
+    [charge] = _rows(g, event="refund")
+    assert charge == {
+        "by": "lead-3",
+        "at": charge["at"],
+        "ticket_id": "T-1001",
+        "amount": 8.0,
+        "outcome": "charged",
+        "event": "refund",
+        "ticket": "T-1001",
+        "thread": "srv-lead",
+    }
+
+
+def test_a_resume_without_the_echo_is_refused_on_the_served_build(charged):
+    g = _served()
+    config = _cfg("srv-no-echo", LEAD)
+    _start(g, config)
+
+    out = g.invoke(Command(resume={"type": "approve"}), config)
+
+    assert charged == []
+    assert out.get("refund_done") is not True
     [row] = _rows(g)
-    assert row["by"] == "lead-3" and row["amount"] == 20.0
-    assert "refused" not in row
+    assert row["refused"] == "refused: the decision does not echo what was shown"
 
 
-@pytest.mark.parametrize(("user", "expected"), [(AGENT, []), (LEAD, [49.0])])
+@pytest.mark.parametrize(
+    ("label", "rewrite"),
+    [
+        ("same ticket, new amount", {**TICKET, "amount": 49.0}),
+        ("another customer's ticket", OTHER),
+    ],
+)
+def test_a_ticket_rewritten_while_paused_is_refused_when_the_lead_approves(
+    charged, label, rewrite
+):
+    """R104 C1: while the refund is paused, the thread owner rewrites the
+    ticket through the state API (no run, so no create_run 403). The lead
+    approves what they were shown - T-1001, $10 - and the gate, re-running
+    on the rewritten state, refuses: nothing is charged, and the refusal is
+    filed under the customer the approver confirmed."""
+    g = _served()
+    config = _cfg(f"srv-swap-{label}", AGENT)
+    _start(g, config)
+    g.update_state(config, {"ticket": rewrite})
+    assert g.get_state(config).next == ("approval_gate",)
+
+    out = g.invoke(approve(), _cfg(f"srv-swap-{label}", LEAD))
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    [row] = _rows(g, customer_id=rewrite["customer_id"])
+    assert row["by"] == "lead-3"
+    assert row["refused"] == "refused: the ticket changed after the approver saw it"
+
+
+def test_a_stale_approval_with_a_swapped_ticket_charges_nothing(charged):
+    """R104 I1: after a lead approves T-1001, a goto to refund with the
+    ticket swapped to T-2002 finds an approval for a different ticket."""
+    g = _served()
+    config = _cfg("srv-stale", LEAD)
+    _start(g, config)
+    g.invoke(approve(), config)
+    assert charged == [("T-1001", 10.0)]
+
+    g.invoke(Command(update={"ticket": OTHER}, goto="refund"), config)
+
+    assert charged == [("T-1001", 10.0)]
+    refund_rows = _rows(g, event="refund")
+    assert [r["outcome"] for r in refund_rows] == [
+        "charged",
+        "refused: the approval is for a different ticket",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user", "expected"), [(AGENT, []), (LEAD, [("T-1001", 10.0)])]
+)
 def test_server_resolve_wiring_refuses_a_non_lead_and_charges_a_lead(
     charged, user, expected
 ):
@@ -493,7 +590,7 @@ def test_server_resolve_wiring_refuses_a_non_lead_and_charges_a_lead(
             {"messages": [{"role": "user", "content": "refund"}], "ticket": TICKET},
             config,
         )
-        return await g.ainvoke(Command(resume={"type": "approve"}), config)
+        return await g.ainvoke(approve(), config)
 
     out = asyncio.run(run())
 

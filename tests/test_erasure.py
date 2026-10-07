@@ -235,9 +235,7 @@ def test_retained_audit_lists_every_row_past_a_page_edge(monkeypatch):
 def _with_approval() -> tuple[InMemoryStore, str]:
     store = _seeded()
     record = {"decision": "approve", "by": "lead-3", "at": "2026-10-07T10:00:00+00:00"}
-    key = record_approval(
-        store, {"id": "T-1", "customer_id": "C-1"}, "t-1", "cp-1", record
-    )
+    key = record_approval(store, "C-1", "t-1", "cp-1", {**record, "ticket_id": "T-1"})
     return store, key
 
 

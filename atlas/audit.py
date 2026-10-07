@@ -15,10 +15,11 @@ Two writers share one namespace, `audit_ns(customer_id)`:
 
 - `AuditGate` records every tool call the resolve agent makes, refused or
   not: tool, args, role, result status, time.
-- `record_approval` records every Chapter 11 approval decision: decision,
-  approver, time, ticket, thread, and the amount sent on to `refund`
-  (after an edit), or the refusal and who was refused - at the gate, or at
-  the refund node, which checks again before it charges. Append-only: every
+- `record_approval` records every Chapter 11 approval decision (event
+  "approval": decision, approver, time, the ticket id, customer and amount
+  the approver confirmed, what they were shown, or the refusal) and every
+  outcome of the refund node, which checks again before it charges (event
+  "refund": charged, refused, provider refused, failed). Append-only: every
   write has its own key. The refund is a graph node, not a tool,
   so `AuditGate` never sees it; and Chapter 11's `approval` record lives in
   graph state, which is a checkpoint, and checkpoints are the first thing
@@ -97,27 +98,29 @@ class AuditGate(AgentMiddleware):
 
 def record_approval(
     store: BaseStore,
-    ticket: dict[str, Any],
+    customer_id: str | None,
     thread_id: str,
     checkpoint_id: str,
     record: dict[str, Any],
+    event: str = "approval",
 ) -> str:
-    """Append one approval event to the audit namespace. Returns its key.
+    """Append one approval or refund event to a customer's audit namespace.
 
-    Append-only by construction: every write gets a fresh key, the thread,
-    the checkpoint the decision was made at, and a random suffix, so no
-    write can land on another's row and nothing is read first. A gate or
-    refund node that runs again (a retry, a replay, a fork from an earlier
+    Append-only by construction: every write gets a fresh key - the thread,
+    the checkpoint the event happened at, and a random suffix - so no write
+    can land on another's row and nothing is read first. A gate or refund
+    node that runs again (a retry, a replay, a fork from an earlier
     checkpoint) logs its own row; a reader sorts by `at` and reads them all.
-    """
-    key = f"approval:{thread_id}:{checkpoint_id}:{uuid4().hex}"
+    `customer_id` is the customer the approver confirmed (the approval
+    record's), not whatever the ticket in state says now. Returns the key."""
+    key = f"{event}:{thread_id}:{checkpoint_id}:{uuid4().hex}"
     store.put(
-        audit_ns(ticket.get("customer_id") or "unknown"),
+        audit_ns(customer_id or "unknown"),
         key,
         {
             **record,
-            "event": "approval",
-            "ticket": ticket.get("id"),
+            "event": event,
+            "ticket": record.get("ticket_id"),
             "thread": thread_id,
         },
     )
