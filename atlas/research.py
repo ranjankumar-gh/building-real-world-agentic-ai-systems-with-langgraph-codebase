@@ -15,105 +15,93 @@ explicit bound from "Bounding the handoffs" - the Chapter 6 cycle-guard
 lesson, now spanning agents.
 
 `make_handoff` is a factory, not a single tool: each specialist gets its own
-handoff tool, built with a specialist-specific routing description (see the
-"Vague specialist descriptions produce random routing" warning - the
-descriptions are the supervisor's real routing interface). Every handoff tool
-it builds returns a `Command` that (a) routes to the named specialist via
-`goto=specialist`, (b) carries the scoped `assignment` - not `state["messages"]`
-- as the payload, and (c) uses `graph=Command.PARENT` because the specialist
-nodes live in the parent graph, not inside the tool-calling coordinator's own
-subgraph. The `ToolMessage` acknowledgment keeps the coordinator's own message
-history valid (every tool call needs a matching tool result).
+handoff tool, built with a specialist-specific routing description. Every
+handoff tool it builds returns a `Command` that (a) routes to the named
+specialist via `goto=specialist`, (b) carries the scoped `assignment` - not
+`state["messages"]` - as the payload, and (c) uses `graph=Command.PARENT`
+because the specialist nodes live in the parent graph. Returning
+`Command.PARENT` discards the coordinator's own writes for that step,
+including the AIMessage that holds the tool call, so the update also carries
+that AIMessage and the `ToolMessage` answering it: without the pair, the
+coordinator's next model call would see a tool result for a call it never
+made, and Anthropic's Messages API rejects that history.
+
+One delegation per turn. Two handoff `Command`s in one step do not both run:
+ToolNode merges parent commands only when their `goto` is a list of `Send`,
+so two plain `goto` strings each raise to the parent and one is silently
+lost. The handoff therefore lets the first delegation in a turn through and
+answers every other call in that AIMessage with an error `ToolMessage` (the
+first call's `Command` carries those answers, since the step's own writes are
+discarded). The coordinator sees the refusal on its next turn and delegates
+again. Chapter 17's `Send` is how work runs side by side.
+
+The tool reads `runtime.state` from the coordinator's own graph, so the
+coordinator's state schema must carry `handoffs`: `SupervisorState` extends
+`AgentState` with it, and `supervisor` passes `state_schema=SupervisorState`.
+The run's input seeds `handoffs` at 0.
 
 The tool is named explicitly - `@tool(f"delegate_to_{specialist}", ...)` -
 rather than left to default to the wrapper function's own name. Every call to
 `make_handoff` defines a function literally named `handoff`, so without an
 explicit name every specialist's handoff tool would register under the same
-name; `create_agent`'s tool node keeps only the last one added
-(`tools_by_name` is a dict keyed by name), and the model would see a single
-delegation tool that always routed to whichever specialist happened to be
-registered last - silently, with no error at construction. Verified against
-the pinned `langchain==1.3.0` build: two `@tool(description=...)`-only
-handoffs collide exactly this way; the explicit per-specialist name fixes it.
+name; `create_agent`'s tool node keeps only the last one added, silently.
 
-`supervisor` is a `create_agent` whose only tools are handoffs - it never
-researches itself, only routes. `web_research` is the specialist node the
-chapter writes out in full: it reads `state["assignment"]` as the *entire*
-input to its own scoped `create_agent`, not the shared history, which is
-payload control made concrete. `atlas/tools.py`'s `web_search_tool` (added in
-this same chapter, alongside the Chapter 7 `search_kb`) is its tool.
+`web_research` and `doc_research` read `state["assignment"]` as the *entire*
+input to their own scoped `create_agent`, append to `findings`, and report
+back on `messages` with a `HumanMessage` named for the specialist. That
+report is how the coordinator sees the findings: its model reads only
+`messages`. It is a user-side message, so the coordinator's next call still
+ends on a user turn after its tool result (langchain-anthropic merges the
+`ToolMessage` and the report into one user turn).
 
-The chapter's own code stops at `web_research`; a `doc_research` specialist
-and a `compile` node are named in prose ("Wire it with StateGraph...") but
-not given as code, so they are not invented here - see the chapter's "What's
-Next" for why the full parallel wiring (subgraphs, `Send`-based map-reduce)
-is deferred to Chapter 17, where the supervisor's one-at-a-time delegation
-becomes genuine concurrency.
+`build_supervisor_graph` wires it: `supervisor` -> a specialist (by the
+handoff's `Command`) -> `route_from_specialist` -> back to `supervisor`, or
+to `compile` once `handoffs` reaches `MAX_HANDOFFS`. The normal end is the
+coordinator answering without a tool call: its node returns and the static
+`supervisor -> END` edge ends the run (a static edge to END fires alongside a
+handoff's `goto` too, but END schedules nothing, so the specialist still
+runs). `compile` is only the bound's graceful exit. `supervisor_graph` is the
+compiled result.
 
-`route_from_specialist` is the routing function for the bound: once
-`handoffs` reaches `MAX_HANDOFFS`, degrade gracefully to a `"compile"` node
-rather than let the run loop forever or hit LangGraph's `recursion_limit` -
-the chapter's point that a multi-agent recursion crash takes down the
-coordinator and every specialist with it, worse than a single-agent runaway.
+Chapter 20, "Observability and Debugging with LangSmith", adds `name=` to
+`supervisor` and to each specialist's scoped `create_agent` call. See
+"Naming the fleet: attribution across the supervisor topology".
 
-Chapter 20, "Observability and Debugging with LangSmith", finally supplies
-the `doc_research` specialist this module deferred all the way back at
-Chapter 16 ("Wire it with StateGraph..." named it in prose but gave no
-code) - given now as code alongside `name=` on `supervisor` and on
-`web_research`'s own scoped `create_agent` call. See "Naming the fleet:
-attribution across the supervisor topology". Like `web_research`,
-`doc_research` is not mounted into a compiled `StateGraph` anywhere in this
-module - Chapter 17's `research_graph` (the Send-based map-reduce subgraph
-below) is the wiring `atlas/graph.py` actually mounts; `supervisor`/
-`web_research`/`doc_research` remain the hand-rolled illustration Chapter
-16 built and this chapter re-visits purely for attribution.
-
-Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", is where the "full
-parallel wiring" this docstring deferred above finally lands - but not as a
-literal refactor of `web_research`/`doc_research` into fanned-out workers.
-The chapter's own code ("Building the map-reduce") is a fresh, self-contained
-illustration of the `Send` + reducer shape against a generic `sources` list,
-so that is what is built here too: `search_source`/`SourceUnavailable` (a
-seeded, mockable backend, same convention as `atlas/tools.py`'s `_KB`/`_WEB`),
-`fan_out`, `research_worker`, and a compiled `research_graph` subgraph
-(`plan` -> N parallel `research_worker`s -> `END`) built from exactly the
-fragments the chapter shows. `ResearchState` is *extended* rather than
-duplicated under a colliding second definition: `sources` is new, and
-`findings` widens from `list[str]` (a specialist's prose finding) to
-`list[dict]` (a worker's structured `{"source", "result"}` or
-`{"source", "error"}` finding) - both still merge through the same `add`
-reducer, since neither TypedDict field nor `add` enforce element type at
-runtime. `atlas/graph.py` mounts `research_graph` as a wrapped node (Chapter
-18's `atlas/deep_research.py` and Chapter 19's streaming example both import
-`search_source`/`SourceUnavailable` from here directly, so those two names -
-unlike the still-uncoded `doc_research`/`compile` - are load-bearing beyond
-this module and are not optional).
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", is the parallel
+alternative - not a refactor of the specialists into fanned-out workers. The
+chapter's code is a self-contained illustration of the `Send` + reducer
+shape against a generic `sources` list: `search_source`/`SourceUnavailable`
+(a seeded, mockable backend, same convention as `atlas/tools.py`'s
+`_KB`/`_WEB`), `fan_out`, `research_worker`, and a compiled `research_graph`
+(`plan` -> N parallel `research_worker`s -> `END`). `ResearchState` is
+*extended* rather than duplicated: `sources` is new, and `findings` widens
+from `list[str]` (a specialist's prose finding) to `list[dict]` (a worker's
+`{"source", "result"}` or `{"source", "error"}` finding); both still merge
+through the same `add` reducer. Research stays its own compiled graph: Atlas's
+support graph (`atlas/graph.py`) does not mount it, since no triage route
+leads to research. `atlas/run.py`'s `run_research` invokes `research_graph`
+directly; Chapter 18's `atlas/deep_research.py` and Chapter 19's streaming
+example import `search_source`/`SourceUnavailable` from here.
 
 Chapter 24, "Patterns from Production", retrofits this module with the
-memory horizon (Chapter 13's pattern) it had been missing since this
-research extension was first mounted: `research_ns`/`recall_finding`/
-`remember_finding` are `profile_ns`/`compact`/`reflect` (`atlas/memory.py`)
-repointed at research findings instead of a customer profile. `atlas/
-graph.py`'s `research` node is the actual mounted pipeline this retrofit
-targets - not the never-mounted Chapter 16 `supervisor` illustration above -
-so the intended wiring is a recall check ahead of `research`'s call into
-`research_graph`, and a `remember_finding` call from `summarize_findings`
-once a fresh run's findings are assembled. Neither call site is added to
-`atlas/graph.py` here: the chapter's own code stops at the three store
-functions, the same "named in prose, not given as code" pattern `doc_research`/
-`compile` already established above, so the wiring is not invented here
-either.
+memory horizon (Chapter 13's pattern) it had been missing:
+`research_ns`/`recall_finding`/`remember_finding` are
+`profile_ns`/`compact`/`reflect` (`atlas/memory.py`) repointed at research
+findings instead of a customer profile. The chapter's own code stops at the
+three store functions, so no call site is invented here.
 """
 
 from datetime import datetime, timedelta, timezone
 from operator import add
 from typing import Annotated, TypedDict
 
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import AnyMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Command, Send
 
@@ -128,25 +116,42 @@ class ResearchState(TypedDict):
     handoffs: int  # explicit bound (Chapter 6)
 
 
-def make_handoff(specialist: str, description: str):
+ONE_AT_A_TIME = "Not delegated: one delegation per turn. Wait for the first result."
+
+
+def make_handoff(specialist: str, description: str) -> BaseTool:
     """Build a handoff tool that routes to a specialist with a SCOPED payload."""
 
     @tool(f"delegate_to_{specialist}", description=description)
-    def handoff(task: str, runtime: ToolRuntime) -> Command:
+    def handoff(task: str, runtime: ToolRuntime) -> Command | ToolMessage:
+        call = runtime.state["messages"][-1]  # the AIMessage making this call
+        first, *extra = call.tool_calls
+        if first["id"] != runtime.tool_call_id:  # a second delegation this turn
+            return ToolMessage(
+                ONE_AT_A_TIME, tool_call_id=runtime.tool_call_id, status="error"
+            )
         ack = ToolMessage(
             f"Delegated to {specialist}.", tool_call_id=runtime.tool_call_id
         )
+        refused = [
+            ToolMessage(ONE_AT_A_TIME, tool_call_id=c["id"], status="error")
+            for c in extra
+        ]
         return Command(
             goto=specialist,
             update={
                 "assignment": task,  # the scoped sub-task, not the transcript
-                "messages": [ack],
+                "messages": [call, ack, *refused],  # the call AND its answers
                 "handoffs": runtime.state["handoffs"] + 1,
             },
             graph=Command.PARENT,  # routes in the parent graph, where specialists live
         )
 
     return handoff
+
+
+class SupervisorState(AgentState):
+    handoffs: int  # the handoff tool reads it from the coordinator's own state
 
 
 supervisor = create_agent(
@@ -156,12 +161,20 @@ supervisor = create_agent(
         make_handoff("doc_research", "Delegate an internal-docs sub-task."),
     ],
     system_prompt=(
-        "You coordinate research specialists. Break the request into "
-        "sub-tasks and delegate each with a precise, self-contained task "
-        "description. Do not research yourself."
+        "You coordinate research specialists. Delegate one sub-task at a "
+        "time, with a precise, self-contained task description; each "
+        "specialist's findings come back to you before you choose the next. "
+        "When the findings answer the request, answer it. Do not research "
+        "yourself."
     ),
+    state_schema=SupervisorState,
     name="supervisor",  # Chapter 20: see "Naming the fleet".
 )
+
+
+def report(specialist: str, finding: str) -> HumanMessage:
+    """The finding, as the coordinator reads it on its next turn."""
+    return HumanMessage(f"{specialist} found: {finding}", name=specialist)
 
 
 def web_research(state: ResearchState) -> dict:
@@ -172,24 +185,25 @@ def web_research(state: ResearchState) -> dict:
     result = agent.invoke(
         {"messages": [{"role": "user", "content": state["assignment"]}]}
     )
-    return {"findings": [text_of(result["messages"][-1])]}
+    finding = text_of(result["messages"][-1])
+    return {"findings": [finding], "messages": [report("web_research", finding)]}
 
 
 def doc_research(state: ResearchState) -> dict:
     """A specialist node: reads its SCOPED assignment, not the transcript.
 
-    Chapter 20 finally supplies this specialist as code - deferred as prose
-    only since Chapter 16 (see the module docstring). Identical shape to
-    `web_research`, against `atlas/tools.py`'s Chapter 7 knowledge-base tool
-    instead of the web-search one, with its own distinct trace name so a
-    trace tree does not read as the same specialist calling itself twice."""
+    Identical shape to `web_research`, against `atlas/tools.py`'s Chapter 7
+    knowledge-base tool instead of the web-search one. Chapter 20 adds the
+    distinct trace name, so a trace tree does not read as the same
+    specialist calling itself twice."""
     agent = create_agent(
         model="claude-sonnet-4-6", tools=[search_kb], name="doc-research"
     )
     result = agent.invoke(
         {"messages": [{"role": "user", "content": state["assignment"]}]}
     )
-    return {"findings": [text_of(result["messages"][-1])]}
+    finding = text_of(result["messages"][-1])
+    return {"findings": [finding], "messages": [report("doc_research", finding)]}
 
 
 MAX_HANDOFFS = 6
@@ -200,6 +214,34 @@ def route_from_specialist(state: ResearchState) -> str:
     if state["handoffs"] >= MAX_HANDOFFS:
         return "compile"  # degrade gracefully: compile what we have
     return "supervisor"
+
+
+def compile_findings(state: ResearchState) -> dict:
+    """The bound's exit: answer with what the specialists found so far."""
+    found = "\n".join(f"- {f}" for f in state["findings"])
+    return {"messages": [AIMessage(f"Handoff limit reached. Findings:\n{found}")]}
+
+
+def build_supervisor_graph(
+    coordinator: CompiledStateGraph = supervisor,
+) -> CompiledStateGraph:
+    """Wire the coordinator, the specialists, and the bound's exit."""
+    g = StateGraph(ResearchState)
+    g.add_node("supervisor", coordinator, destinations=("web_research", "doc_research"))
+    g.add_node("web_research", web_research)
+    g.add_node("doc_research", doc_research)
+    g.add_node("compile", compile_findings)
+    g.add_edge(START, "supervisor")
+    g.add_edge("supervisor", END)  # normal exit: the coordinator answered
+    for specialist in ("web_research", "doc_research"):
+        g.add_conditional_edges(
+            specialist, route_from_specialist, ["supervisor", "compile"]
+        )
+    g.add_edge("compile", END)
+    return g.compile()
+
+
+supervisor_graph = build_supervisor_graph()  # invoke with "handoffs": 0
 
 
 # --- Chapter 17: Send-based map-reduce -------------------------------------

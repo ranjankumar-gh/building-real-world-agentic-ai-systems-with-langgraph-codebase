@@ -104,8 +104,9 @@ results through `select_docs` with `BUDGET.retrieved` before it writes
 whole slice leaves the list empty, which is Chapter 6's "nothing usable"
 path: retry, then escalate - never a reply that found nothing. Because the
 cap lives in `retrieve`, `retrieved` is capped whatever node is mounted at
-"answer" through `build_graph` (Chapter 17's pattern); that mounted agent
-reads only `messages`, and its own `ContextBudget` bounds its history.
+"answer" through `build_graph` (Chapter 17's pattern); `atlas/resolve.py`'s
+adapter hands that mounted agent the capped documents and the profile in one
+system message, and the agent's own `ContextBudget` bounds its history.
 
 Chapter 13, "Short-Term vs Long-Term Memory", adds `recall` and `remember` -
 the node-facing side of the cross-thread store (`atlas/memory.py` holds the
@@ -131,24 +132,27 @@ node: reflection runs after the graph returns, off the hot path
 (atlas/run.py's `run_and_reflect`), and writes extracted facts into the
 same profile namespace, so `recall` above loads them on the next thread.
 
-Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", mounts
-`atlas/research.py`'s compiled `research_graph` as a node. `AtlasState` and
-`ResearchState` share no keys (Atlas has no native notion of "sources"), so
-per "Subgraphs: the research pipeline as a reusable unit" this cannot be
-mounted directly - `research` below is the wrapping node the chapter shows
-for exactly that case, adapting in with `derive_sources` and back out with
-`summarize_findings`. `derive_sources` reads from `ticket`, the same
-free-form per-request dict `approval_gate`/`refund` already read
-ticket-scoped data from. `research` is added to `builder` (the chapter's
-own code calls `add_node`) but is not wired into `route_from_triage`'s
-edges - the chapter names the node, not a place in the routing topology to
-reach it from.
+Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", shows how a compiled
+subgraph is mounted, using `atlas/research.py`'s `research_graph`.
+`ResearchState` shares `messages` with `AtlasState`, but the key the
+map-reduce reads, `sources`, does not exist here (Atlas has no native notion
+of one), so a direct mount would hand the subgraph nothing to work on.
+`research` below is the wrapping node the chapter shows for that case,
+adapting in with `derive_sources` (from `ticket`, the same free-form
+per-request dict `approval_gate`/`refund` read) and back out with
+`summarize_findings`. Like `triage_with_command`, it is defined but not added
+to the builder: no triage route leads to research, and an unreachable node
+is dead weight. Research stays its own compiled graph - `atlas/run.py`'s
+`run_research` invokes it directly.
 
-Chapter 21, "Evaluation and Testing", factors the builder-assembly wiring out
-into `_make_builder` and adds `build_graph(model=...)` on top of it - a
-small, additive refactor so `atlas/replay.py`'s checkpoint-replay fixture can
-substitute Chapter 1's `ScriptedModel` for the triage step's decision source
-without touching `builder`/`graph` (still built exactly as before, via
+Chapter 17 also factors the builder-assembly wiring into `_make_builder` and
+adds `build_graph(resolve_node=...)`, the seam `atlas/resolve.py` uses to
+mount a middleware-equipped agent in the "answer" position.
+
+Chapter 21, "Evaluation and Testing", gives `build_graph`'s `model=`
+parameter its use: `atlas/replay.py`'s checkpoint-replay fixture substitutes
+Chapter 1's `ScriptedModel` for the triage step's decision source without
+touching `builder`/`graph` (still built exactly as before, via
 `_make_builder(triage)`), which `tests/test_graph.py` and every other
 chapter's tests continue to depend on unchanged."""
 
@@ -441,7 +445,7 @@ def research(state: AtlasState) -> dict:
     """Adapt Atlas state to the research subgraph and back. `research_graph`
     is the Chapter 17 map-reduce pipeline - `plan` -> `Send`-fanned
     `research_worker`s -> `END` - independently testable and internally
-    parallel; this node is the only place Atlas's own state touches it."""
+    parallel. Defined, not mounted: see the module docstring."""
     out = research_graph.invoke({"sources": derive_sources(state)})
     return {"messages": [summarize_findings(out["findings"])]}
 
@@ -449,12 +453,12 @@ def research(state: AtlasState) -> dict:
 def _make_builder(
     triage_node, resolve_node: Callable[[AtlasState], dict] = answer
 ) -> StateGraph:
-    """Chapter 21, "Testing non-determinism": the wiring shared by the
-    module-level `builder` below and every fixture graph `build_graph`
-    constructs - the exact same Chapter 6-17 topology, parameterized only on
-    which triage callable is wired in for the "triage" node. Chapter 21 adds
-    the `resolve_node` seam for mounting a middleware-equipped agent in the
-    answering position; see Chapter 17's mounting section for the pattern."""
+    """Chapter 17, "Mounting the resolve agent": the wiring shared by the
+    module-level `builder` below and every graph `build_graph` constructs -
+    the same Chapter 6-14 topology, parameterized on the "triage" callable
+    and on `resolve_node`, the callable in the answering position (the
+    model-free `answer` by default). Chapter 21's replay fixture reuses it
+    with a scripted triage."""
     b = StateGraph(AtlasState)
     # Chapter 13: memory on both sides of the turn - recall before triage,
     # remember after answer. Store calls only; no retry_policy needed.
@@ -485,7 +489,7 @@ def _make_builder(
         # of one would decline.
         retry_policy=RetryPolicy(max_attempts=3),
     )
-    b.add_node("answer", resolve_node)
+    b.add_node("answer", resolve_node)  # the seam: defaults to the model-free stub
     b.add_node("escalate", escalate)
     # Chapter 11: the approval gate - no retry_policy, no side effect. It
     # only interrupts and routes; retrying a suspended interrupt is not the
@@ -501,12 +505,6 @@ def _make_builder(
         retry_policy=RetryPolicy(max_attempts=3, retry_on=(RefundError,)),
         error_handler=refund_failed,
     )
-    # Chapter 17: the research subgraph, mounted like any other node -
-    # reusable, internally parallel, independently testable. Not wired into
-    # route_from_triage below; see the module docstring's Chapter 17
-    # paragraph.
-    b.add_node("research", research)
-
     b.add_edge(START, "recall")
     b.add_edge("recall", "triage")
     # Chapter 11: triage's "refund" route now lands on the approval gate, not
@@ -539,9 +537,11 @@ def _make_builder(
 def build_graph(
     model=None, resolve_node: Callable[[AtlasState], dict] | None = None
 ) -> Pregel:
-    """Chapter 21, "Testing non-determinism: replaying a checkpoint": factor
-    the model out to a parameter, the way `create_agent` already takes one,
-    instead of the module-level `classify` every node closes over. `model=
+    """Chapter 17 adds `resolve_node`: the callable mounted as "answer"
+    (`atlas/resolve.py`'s `make_resolve_node` builds one); None keeps the
+    model-free `answer`. Chapter 21, "Testing non-determinism: replaying a
+    checkpoint", gives `model=` its use: factor the model out to a
+    parameter, the way `create_agent` already takes one, instead of the module-level `classify` every node closes over. `model=
     None` reconstructs the exact same graph as the module-level `graph`
     below (the real, `create_agent`-backed `classify`); passing Chapter 1's
     `atlas.breaks.ScriptedModel` swaps ONLY the triage step's decision
@@ -566,9 +566,7 @@ def build_graph(
 
     return _make_builder(
         triage_node, resolve_node=resolve_node or answer
-    ).compile(
-        checkpointer=InMemorySaver(), store=InMemoryStore()
-    )
+    ).compile(checkpointer=InMemorySaver(), store=InMemoryStore())
 
 
 builder = _make_builder(triage)

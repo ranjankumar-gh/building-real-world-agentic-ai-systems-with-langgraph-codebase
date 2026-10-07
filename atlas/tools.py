@@ -88,8 +88,13 @@ def set_ticket_status(ticket_id: str, status: TicketStatus) -> str:
 # Seeded, mockable backend for the Chapter 16 web-research specialist -
 # stands in for a live web-search API so tests run fully offline.
 _WEB: dict[str, str] = {
-    "refund policy": "Most vendors offer refunds within 30 days; check the merchant's terms.",
-    "langgraph": "LangGraph is a low-level orchestration framework for building stateful agents.",
+    "refund policy": (
+        "Most vendors offer refunds within 30 days; check the merchant's terms."
+    ),
+    "langgraph": (
+        "LangGraph is a low-level orchestration framework for building "
+        "stateful agents."
+    ),
 }
 
 

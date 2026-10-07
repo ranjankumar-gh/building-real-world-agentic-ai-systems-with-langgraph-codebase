@@ -569,10 +569,9 @@ def test_graph_compiles_with_the_chapter_3_branching_topology():
     internal `__error_handler__refund` pseudo-node, filtered out here the
     same way `__start__`/`__end__` are. Chapter 11 adds `approval_gate`,
     sitting in front of `refund`. Chapter 13 adds `recall` (START -> recall
-    -> triage) and `remember` (answer -> remember -> END). Chapter 17 adds
-    `research`, the mounted map-reduce subgraph - present as a node but not
-    wired into any edge, so it is an orphan in this topology on purpose
-    (LangGraph compiles unreachable nodes without error)."""
+    -> triage) and `remember` (answer -> remember -> END). Chapter 17 adds no
+    node: research stays its own compiled graph, since no triage route
+    leads to it."""
     node_names = {
         name for name in graph.get_graph().nodes if not name.startswith("__")
     }
@@ -584,7 +583,6 @@ def test_graph_compiles_with_the_chapter_3_branching_topology():
         "escalate",
         "approval_gate",
         "refund",
-        "research",
         "recall",
         "remember",
     }
@@ -1390,14 +1388,12 @@ def test_research_node_survives_an_unreachable_source_without_crashing():
     assert "unavailable" in delta["messages"][0].content
 
 
-def test_research_is_registered_as_a_node_but_not_wired_into_any_edge():
-    """The chapter's own code adds the node
-    (`builder.add_node("research", research)`) but names no place in the
-    routing topology to reach it from."""
-    assert "research" in graph.nodes
-    graph_edges = graph.get_graph().edges
-    assert not any(edge.source == "research" or edge.target == "research"
-                   for edge in graph_edges)
+def test_research_is_its_own_graph_not_an_unreachable_node_in_atlas():
+    """No triage route leads to research, so Atlas's support graph does not
+    carry it as a node; `research` (the wrapper) and `research_graph` stay
+    callable on their own."""
+    assert "research" not in graph.nodes
+    assert callable(research)
 
 
 def test_build_graph_mounts_a_custom_resolve_node() -> None:

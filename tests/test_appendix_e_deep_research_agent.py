@@ -11,25 +11,16 @@ own behavior. It tests the appendix's own comparison claims instead: the
 "Side by side" table's rows about mounting, shared backend, and partial
 failure, plus one gap the appendix's table does not mention.
 
-The gap: the appendix compares only two of the THREE research
-implementations Atlas has accumulated. Chapter 16's hand-rolled
-`supervisor`/`web_research`/`doc_research` (see `atlas/research.py`'s module
-docstring) is never mounted into any compiled `StateGraph` anywhere in this
-repo - confirmed below by asserting `"supervisor"` is absent from
-`atlas.graph.builder`'s nodes. The appendix's own "Mounted into Atlas"
-listing for Form 1 is also incomplete on its own: `research_graph` IS
-mounted as a node named `"research"` in `atlas/graph.py`, but that node has
-no incoming edge - `atlas/graph.py`'s own docstring says so plainly ("the
-chapter names the node, not a place in the routing topology to reach it
-from"). A reader with only Appendix E's "Mounted into Atlas" snippet would
-not know that. This module asserts both facts directly against the compiled
-graph object rather than trusting either chapter's prose, so a future chapter
-that finally wires `route_from_triage` to reach "research" (or mounts the
-Chapter 16 supervisor) will break these tests as its signal to update this
-appendix - not leave the drift undetected."""
+Mounting, as of the v1.2 revision: Atlas's support graph (`atlas/graph.py`)
+does not mount `research_graph` - no triage route leads to research, so the
+node was dropped rather than left unreachable. Research runs as its own
+compiled graph (`run_research`, and `langgraph.json`'s "research" entry).
+Chapter 16's hand-rolled supervisor is wired into its own compiled graph,
+`atlas.research.supervisor_graph`. The tests below pin both facts, so an
+appendix listing that still shows research mounted inside Atlas fails
+against the code rather than drifting silently."""
 
 from atlas import graph as graph_module
-from atlas import research as research_module
 from atlas.deep_research import deep_research_agent, source_lookup
 from atlas.research import (
     SourceUnavailable,
@@ -37,49 +28,23 @@ from atlas.research import (
     research_worker,
     search_source,
     supervisor,
+    supervisor_graph,
 )
 
 
-def test_form_1_research_graph_is_mounted_as_a_node_in_atlas_graph():
-    """Appendix E's "Mounted into Atlas" listing, Form 1: `research_graph` is
-    a node in Atlas's own compiled builder, not just a standalone subgraph."""
-    assert "research" in graph_module.builder.nodes
+def test_form_1_research_graph_is_its_own_graph_not_a_node_in_atlas():
+    """Research is a separate compiled graph; Atlas's builder has no
+    "research" node."""
+    assert "research" not in graph_module.builder.nodes
+    assert hasattr(research_graph, "invoke")
 
 
-def test_form_1_research_node_has_no_incoming_edge_in_the_live_routing_graph():
-    """The nuance the appendix's own listing does not spell out: being a
-    node in `builder` is not the same as being reachable. `atlas/graph.py`'s
-    docstring says this plainly ("the chapter names the node, not a place in
-    the routing topology to reach it from") - this test pins that fact
-    against the actual compiled graph so a later chapter wiring it in has to
-    update this appendix too."""
-    compiled = graph_module.graph.get_graph()
-    incoming = [edge for edge in compiled.edges if edge.target == "research"]
-
-    assert incoming == []
-
-
-def test_form_0_ch16_supervisor_is_still_not_mounted_anywhere():
-    """The comparison the appendix's own "Side by side" table does not
-    draw: Chapter 16's hand-rolled supervisor topology (`supervisor`,
-    `web_research`, `doc_research`) exists and is unit-tested
-    (tests/test_research.py) but is not a node in ANY compiled StateGraph in
-    this repo - not Atlas's main graph, not a subgraph of its own. Form 1 and
-    Form 2 both eventually get real (if differently reachable) pipelines;
-    Form 0 never does. This is the cross-chapter research-architecture drift
-    flagged repeatedly in prior chapter/appendix builds - documented here,
-    not fixed, per Appendix E's own scope (a side-by-side listing, not a
-    redesign)."""
-    assert hasattr(research_module, "supervisor")
+def test_form_0_ch16_supervisor_runs_as_its_own_compiled_graph():
+    """Chapter 16's supervisor topology is wired into
+    `supervisor_graph`, not into Atlas's support graph."""
+    nodes = set(supervisor_graph.get_graph().nodes)
+    assert {"supervisor", "web_research", "doc_research", "compile"} <= nodes
     assert "supervisor" not in graph_module.builder.nodes
-    assert "web_research" not in graph_module.builder.nodes
-    assert "doc_research" not in graph_module.builder.nodes
-
-
-def test_supervisor_still_compiles_even_though_it_is_never_mounted():
-    """Not broken, just orphaned: the Chapter 16 illustration still builds a
-    real, invokable create_agent graph - it simply has no caller in this
-    codebase."""
     assert hasattr(supervisor, "invoke")
 
 

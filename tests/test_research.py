@@ -8,7 +8,11 @@ does - matching the no-live-call convention already used for
 checked here is the handoff `Command` shape - the chapter's central claim is
 that the payload it carries is a SCOPED assignment, not the transcript - and
 `web_research`, with its own scoped `create_agent` call mocked so no model
-runs.
+runs. The wired `build_supervisor_graph` runs end to end against a scripted
+coordinator model: a delegation round trip (handoff -> specialist -> back ->
+normal end), the history the coordinator's second call receives as
+langchain-anthropic formats it for the Messages API, a double delegation in
+one turn, and the handoff bound.
 
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds the Send-based
 map-reduce tests below: `search_source`/`SourceUnavailable` is a seeded,
@@ -33,8 +37,14 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
+from typing import Any
+
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain.agents import create_agent
+from langchain_anthropic.chat_models import _format_messages
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.prebuilt.tool_node import ToolRuntime
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Send
@@ -44,6 +54,8 @@ from atlas.research import (
     DEFAULT_TTL_DAYS,
     MAX_HANDOFFS,
     SourceUnavailable,
+    SupervisorState,
+    build_supervisor_graph,
     doc_research,
     fan_out,
     make_handoff,
@@ -55,6 +67,7 @@ from atlas.research import (
     route_from_specialist,
     search_source,
     supervisor,
+    supervisor_graph,
     web_research,
 )
 
@@ -71,6 +84,16 @@ def _tool_runtime(state: dict, tool_call_id: str = "call_1") -> ToolRuntime:
         stream_writer=lambda _: None,
         store=None,
     )
+
+
+def _calling(handoffs: int, *call_ids: str) -> dict:
+    """Coordinator state as the tools node sees it: the last message is the
+    AIMessage whose tool calls are running."""
+    calls = [
+        {"name": "delegate_to_web_research", "args": {"task": "t"}, "id": i}
+        for i in call_ids or ("call_1",)
+    ]
+    return {"messages": [AIMessage("", tool_calls=calls)], "handoffs": handoffs}
 
 
 def test_make_handoff_names_the_tool_for_its_specialist_not_the_wrapper_function():
@@ -97,7 +120,7 @@ def test_handoff_command_scopes_the_payload_to_the_assignment_not_the_transcript
     scoped sub-task, never `state["messages"]` (the prebuilt library's
     default, and the hook's tripled-bill bug)."""
     handoff = make_handoff("web_research", "Delegate a web-search sub-task.")
-    runtime = _tool_runtime(state={"handoffs": 0})
+    runtime = _tool_runtime(state=_calling(0))
 
     result = handoff.func(task="Find the refund policy.", runtime=runtime)
 
@@ -109,7 +132,7 @@ def test_handoff_command_scopes_the_payload_to_the_assignment_not_the_transcript
 
 def test_handoff_command_routes_in_the_parent_graph():
     handoff = make_handoff("doc_research", "Delegate an internal-docs sub-task.")
-    runtime = _tool_runtime(state={"handoffs": 0})
+    runtime = _tool_runtime(state=_calling(0))
 
     result = handoff.func(task="Look up the SLA.", runtime=runtime)
 
@@ -118,7 +141,7 @@ def test_handoff_command_routes_in_the_parent_graph():
 
 def test_handoff_command_increments_the_explicit_bound():
     handoff = make_handoff("web_research", "Delegate a web-search sub-task.")
-    runtime = _tool_runtime(state={"handoffs": 3})
+    runtime = _tool_runtime(state=_calling(3))
 
     result = handoff.func(task="Find the refund policy.", runtime=runtime)
 
@@ -126,17 +149,35 @@ def test_handoff_command_increments_the_explicit_bound():
 
 
 def test_handoff_command_acknowledges_with_a_tool_message_matching_the_call_id():
-    """The ack keeps the coordinator's own message history valid - every
-    tool call needs a matching tool result."""
+    """Command.PARENT discards the coordinator's own writes for the step, so
+    the update carries the tool-call AIMessage AND the ToolMessage that
+    answers it - the pair keeps the coordinator's history valid."""
     handoff = make_handoff("web_research", "Delegate a web-search sub-task.")
-    runtime = _tool_runtime(state={"handoffs": 0}, tool_call_id="call_42")
+    state = _calling(0, "call_42")
+    runtime = _tool_runtime(state=state, tool_call_id="call_42")
 
     result = handoff.func(task="Find the refund policy.", runtime=runtime)
-    [ack] = result.update["messages"]
+    call, ack = result.update["messages"]
 
+    assert call is state["messages"][-1]
     assert isinstance(ack, ToolMessage)
     assert ack.tool_call_id == "call_42"
     assert "web_research" in ack.content
+
+
+def test_a_second_handoff_in_the_same_turn_is_refused_with_a_tool_message():
+    """One delegation per turn: the first call's Command answers the extra
+    call with an error ToolMessage, and the extra call itself returns that
+    refusal instead of a second Command."""
+    handoff = make_handoff("web_research", "Delegate a web-search sub-task.")
+    state = _calling(0, "call_1", "call_2")
+
+    first = handoff.func(task="a", runtime=_tool_runtime(state, "call_1"))
+    second = handoff.func(task="b", runtime=_tool_runtime(state, "call_2"))
+
+    refusal = first.update["messages"][-1]
+    assert (refusal.tool_call_id, refusal.status) == ("call_2", "error")
+    assert isinstance(second, ToolMessage) and second.status == "error"
 
 
 def test_supervisor_compiles_to_an_invokable_graph_without_calling_the_model():
@@ -178,7 +219,10 @@ def test_web_research_reads_only_the_scoped_assignment_not_the_full_history(monk
     assert captured_input["messages"] == [
         {"role": "user", "content": "Find the refund policy."}
     ]
-    assert result == {"findings": ["Refunds: 30-day window."]}
+    assert result["findings"] == ["Refunds: 30-day window."]
+    [report] = result["messages"]
+    assert (report.type, report.name) == ("human", "web_research")
+    assert report.content == "web_research found: Refunds: 30-day window."
 
 
 def test_web_research_names_its_scoped_agent_for_the_trace_tree(monkeypatch):
@@ -228,7 +272,8 @@ def test_doc_research_reads_only_the_scoped_assignment_not_the_full_history(
     assert captured_input["messages"] == [
         {"role": "user", "content": "Find the refund policy."}
     ]
-    assert result == {"findings": ["Refunds: 30-day window."]}
+    assert result["findings"] == ["Refunds: 30-day window."]
+    assert result["messages"][0].name == "doc_research"
 
 
 def test_doc_research_names_its_scoped_agent_for_the_trace_tree(monkeypatch):
@@ -263,6 +308,146 @@ def test_route_from_specialist_degrades_to_compile_at_the_bound():
     """The graceful exit: hitting the explicit bound compiles partial
     findings instead of looping forever or relying on the recursion limit."""
     assert route_from_specialist({"handoffs": MAX_HANDOFFS}) == "compile"
+
+
+# --- Chapter 16: the wired supervisor graph, run end to end ----------------
+
+
+class _ScriptedCoordinatorModel(BaseChatModel):
+    """A chat model that replays a script and records every input, so a
+    test can see exactly what the coordinator's model received."""
+
+    script: list[AIMessage]
+    seen: list[list[BaseMessage]] = []
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "_ScriptedCoordinatorModel":
+        return self
+
+    def _generate(
+        self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=self.script.pop(0))])
+
+
+def _delegate(specialist: str, call_id: str) -> dict:
+    return {
+        "name": f"delegate_to_{specialist}",
+        "args": {"task": f"look up {call_id}"},
+        "id": call_id,
+        "type": "tool_call",
+    }
+
+
+def _wired(monkeypatch, script: list[AIMessage]):
+    """The real build_supervisor_graph around a scripted coordinator; each
+    specialist's own scoped agent is faked, as in the unit tests above."""
+
+    class _FakeSpecialist:
+        def invoke(self, input_):
+            return {"messages": [AIMessage("Refunds: 30-day window.")]}
+
+    model = _ScriptedCoordinatorModel(script=script, seen=[])
+    coordinator = create_agent(
+        model=model,
+        tools=[
+            make_handoff("web_research", "Delegate a web-search sub-task."),
+            make_handoff("doc_research", "Delegate an internal-docs sub-task."),
+        ],
+        system_prompt="coordinate",
+        state_schema=SupervisorState,
+    )
+    monkeypatch.setattr(research_module, "create_agent", lambda **_: _FakeSpecialist())
+    return model, build_supervisor_graph(coordinator)
+
+
+def _anthropic_turns(messages: list[BaseMessage]) -> list[tuple[str, list[str]]]:
+    """The history as langchain-anthropic formats it for the Messages API."""
+    _, formatted = _format_messages(messages)
+    return [
+        (m["role"], [b["type"] for b in m["content"]] if isinstance(m["content"], list)
+         else ["text"])
+        for m in formatted
+    ]
+
+
+def test_supervisor_graph_round_trip_handoff_specialist_back_and_normal_end(
+    monkeypatch,
+):
+    """handoff -> web_research -> route_from_specialist -> supervisor -> END.
+    The coordinator's second call sees its own tool call, the ack, and the
+    specialist's report; the run ends on the coordinator's answer."""
+    model, graph = _wired(
+        monkeypatch,
+        [AIMessage("", tool_calls=[_delegate("web_research", "call_1")]),
+         AIMessage("Refunds are honored for 30 days.")],
+    )
+
+    out = graph.invoke(
+        {"messages": [{"role": "user", "content": "refund policy?"}], "handoffs": 0}
+    )
+
+    assert out["handoffs"] == 1
+    assert out["findings"] == ["Refunds: 30-day window."]
+    assert out["messages"][-1].content == "Refunds are honored for 30 days."
+    second_call = model.seen[1]
+    assert [m.type for m in second_call] == ["system", "human", "ai", "tool", "human"]
+    assert second_call[-1].content == "web_research found: Refunds: 30-day window."
+    assert _anthropic_turns(second_call) == [
+        ("user", ["text"]),
+        ("assistant", ["tool_use"]),
+        ("user", ["tool_result", "text"]),
+    ]
+
+
+def test_two_delegations_in_one_turn_run_one_and_refuse_the_other(monkeypatch):
+    """Both calls get an answer (so the history stays valid), only the first
+    specialist runs, and the counter counts one handoff."""
+    model, graph = _wired(
+        monkeypatch,
+        [AIMessage("", tool_calls=[_delegate("web_research", "call_1"),
+                                   _delegate("doc_research", "call_2")]),
+         AIMessage("done")],
+    )
+
+    out = graph.invoke({"messages": [{"role": "user", "content": "q"}], "handoffs": 0})
+
+    assert out["handoffs"] == 1
+    assert [m.name for m in out["messages"] if m.type == "human"][1:] == [
+        "web_research"
+    ]
+    refusal = next(m for m in out["messages"] if getattr(m, "tool_call_id", "") ==
+                   "call_2")
+    assert refusal.status == "error"
+    assert _anthropic_turns(model.seen[1])[1:] == [
+        ("assistant", ["tool_use", "tool_use"]),
+        ("user", ["tool_result", "tool_result", "text"]),
+    ]
+
+
+def test_a_coordinator_that_never_stops_degrades_to_compile_at_the_bound(
+    monkeypatch,
+):
+    script = [AIMessage("", tool_calls=[_delegate("web_research", f"call_{i}")])
+              for i in range(MAX_HANDOFFS + 2)]
+    model, graph = _wired(monkeypatch, script)
+
+    out = graph.invoke({"messages": [{"role": "user", "content": "q"}], "handoffs": 0})
+
+    assert out["handoffs"] == MAX_HANDOFFS
+    assert len(model.seen) == MAX_HANDOFFS
+    assert out["messages"][-1].content.startswith("Handoff limit reached.")
+
+
+def test_supervisor_graph_compiles_with_the_real_coordinator():
+    assert set(supervisor_graph.get_graph().nodes) >= {
+        "supervisor", "web_research", "doc_research", "compile"
+    }
 
 
 # --- Chapter 17: Send-based map-reduce -------------------------------------
