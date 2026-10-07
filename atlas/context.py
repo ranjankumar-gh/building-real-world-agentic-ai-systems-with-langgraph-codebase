@@ -19,6 +19,11 @@ richer, long-term-memory half of select is Chapters 13-14.
 `ContextBudget` on `resolve_agent` (atlas/agent.py) and by `answer`, so the
 two slices cannot drift apart.
 
+The trim lives in `_view`, shared by `wrap_model_call` and its async twin
+`awrap_model_call` (Chapter 8's rule: under `ainvoke`/`astream` the model
+node calls the async hook, and a middleware with only the sync one raises
+`NotImplementedError` there).
+
 The trim passes no `include_system`: `ModelRequest.messages` excludes the
 system message (`create_agent` carries it as `request.system_message` and
 prepends it only when it calls the model), so there is no system prompt in
@@ -27,7 +32,7 @@ the list to keep, and the prompt never counts against `history`.
 `atlas/state.py`'s `Doc` has carried `score: float` since Chapter 5 (set
 by the retriever); `select_docs` is its first reader."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -56,11 +61,7 @@ class ContextBudget(AgentMiddleware):
     def __init__(self, budget: Budget) -> None:
         self.budget = budget
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
+    def _view(self, request: ModelRequest) -> ModelRequest:
         trimmed = trim_messages(
             request.messages,
             max_tokens=self.budget.history,
@@ -68,7 +69,21 @@ class ContextBudget(AgentMiddleware):
             strategy="last",  # keep the most recent turns
             start_on="human",
         )
-        return handler(request.override(messages=trimmed))
+        return request.override(messages=trimmed)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(self._view(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return await handler(self._view(request))
 
 
 def select_docs(docs: list[Doc], max_tokens: int) -> list[Doc]:

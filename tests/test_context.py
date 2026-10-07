@@ -202,3 +202,39 @@ def test_the_system_prompt_travels_outside_request_messages_in_a_real_agent():
     assert not any(isinstance(m, SystemMessage) for m in seen["messages"])
     assert seen["system"].content == "You are Atlas."
     assert count_tokens_approximately(seen["messages"]) <= 40
+
+
+def test_context_budget_trims_the_view_under_ainvoke_too():
+    """The async twin: under `ainvoke` the model node calls
+    `awrap_model_call`. Without it the run raises NotImplementedError; with
+    it, the async path gets the same trimmed view as the sync one."""
+    import asyncio
+
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+
+    seen = {}
+
+    class Record(AgentMiddleware):
+        async def awrap_model_call(self, request, handler):
+            seen["messages"] = list(request.messages)
+            return await handler(request)
+
+    model = FakeMessagesListChatModel(responses=[AIMessage("done")])
+    agent = create_agent(
+        model=model,
+        tools=[],
+        system_prompt="You are Atlas.",
+        middleware=[ContextBudget(Budget(history=40, retrieved=500)), Record()],
+    )
+    history = _long_conversation(turns=10) + [HumanMessage("hi")]
+
+    result = asyncio.run(agent.ainvoke({"messages": history}))
+
+    assert result["messages"][-1].content == "done"
+    assert len(seen["messages"]) < len(history)
+    assert count_tokens_approximately(seen["messages"]) <= 40
+    assert isinstance(seen["messages"][0], HumanMessage)
