@@ -18,7 +18,9 @@ stops at the next superstep boundary with a resumable checkpoint instead of
 losing an in-flight conversation to a hard kill. `inputs` is the shape of a
 refund request: Atlas does not look tickets up, so the support system that
 opened the ticket passes it in beside the customer's message, and the
-`refund` node reads `id` and `amount` from it.
+`refund` node reads `id` and `amount` from it. The ticket also names the
+customer it belongs to (`customer_id`), which Chapter 13's `recall` and
+`remember` read to reach that customer's long-term profile.
 
 Chapter 11, "Human-in-the-Loop", adds `run_to_approval` and
 `resume_approval` - "Suspend, surface, resume": driving Atlas's "refund"
@@ -28,6 +30,16 @@ surfaced proposed refund); `resume_approval` invokes the SAME thread_id with
 a `Command(resume=decision)` carrying the human's decision - no new input,
 just the answer to the question the gate asked.
 
+Chapter 14, "Advanced Memory: Extraction, Compaction, and LangMem", adds
+`run_and_reflect` - background reflection, off the hot path: the graph
+answers, the function returns the result at once, and `atlas/memory.py`'s
+`reflect` runs afterwards on `reflection_pool`, writing into the store the
+graph was compiled with (`graph.store`). One worker on purpose: reflections
+run one at a time, so `compact`'s read-then-write never races itself (the
+lost update Chapter 13 warns about). A real deployment keys a durable queue
+by customer instead; this pool dies with the process, and a failure shows
+up only on the Future, which `_log_failure` logs.
+
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds `run_research` -
 "Bound the fan-out": ten concurrent workers is fine, a hundred is a
 rate-limit outage, so `max_concurrency` caps how many fanned-out branches
@@ -35,12 +47,18 @@ run at once. Set on `invoke`'s `config`, not on the graph itself - the same
 `research_graph` can be called with a different bound per call.
 """
 
+import logging
+from concurrent.futures import Future, ThreadPoolExecutor
+
 from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
 from langgraph.types import Command, StateSnapshot
 
 from atlas.graph import graph
+from atlas.memory import reflect
 from atlas.research import research_graph
+
+logger = logging.getLogger(__name__)
 
 
 def run_two_turns(thread_id: str) -> dict:
@@ -76,7 +94,7 @@ def inspect(thread_id: str) -> StateSnapshot:
 # plus the ticket it is about. The id and amount match the seeded backend.
 inputs = {
     "messages": [{"role": "user", "content": "I need a refund."}],
-    "ticket": {"id": "T-1001", "amount": 49.0},
+    "ticket": {"id": "T-1001", "amount": 49.0, "customer_id": "C-1"},
 }
 
 
@@ -149,3 +167,23 @@ def run_research(sources: list[str], max_concurrency: int = 8) -> dict:
     return research_graph.invoke(
         {"sources": sources}, config={"max_concurrency": max_concurrency}
     )
+
+
+reflection_pool = ThreadPoolExecutor(max_workers=1)  # one reflection at a time
+
+
+def _log_failure(future: Future) -> None:
+    if future.exception() is not None:
+        logger.error("reflection failed", exc_info=future.exception())
+
+
+def run_and_reflect(thread_id: str, inputs: dict) -> dict:
+    """Answer now, learn afterwards: the reply never waits on extraction."""
+    config = {"configurable": {"thread_id": thread_id}}
+    result = graph.invoke(inputs, config)
+    customer_id = inputs["ticket"]["customer_id"]
+    future = reflection_pool.submit(
+        reflect, graph.store, customer_id, result["messages"]
+    )
+    future.add_done_callback(_log_failure)
+    return result

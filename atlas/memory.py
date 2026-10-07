@@ -3,97 +3,129 @@ BaseStore-backed long-term memory that persists customer facts across
 conversations, independent of any `thread_id`.
 
 See "Building long-term memory". The checkpointer (Chapter 9) is
-short-term: it holds one conversation's state, scoped to `thread_id`, and is
-meant to be forgotten when the thread ends. The store is long-term: a
-`BaseStore` that persists JSON under a namespace tuple and a key,
-independent of any thread, configured beside the checkpointer
-(`compile(store=...)` / `create_agent(..., store=...)`) rather than
+short-term: it holds one conversation's state, scoped to `thread_id`, and no
+other conversation can reach it. The store is long-term: a `BaseStore` that
+persists JSON under a namespace tuple and a key, independent of any thread,
+configured beside the checkpointer (`compile(store=...)`) rather than
 replacing it.
 
-`atlas/graph.py`'s `remember`/`recall` are the store's node-facing side -
-they reach it through `runtime.store`, the same handle the graph gives every
-node. This module holds the store's own shape: the namespace convention
-that makes it a privacy boundary (`profile_ns`), semantic search over it
-(`relevant_memories`), and the dev/prod backend swap (`build_dev_store`/
-`build_prod_store`), which mirrors Chapter 9's checkpointer swap exactly -
-same interface, different backend, `.setup()` as a migration.
+`atlas/graph.py`'s `recall`/`remember` are the store's node-facing side, and
+they are wired into Atlas: `recall` runs before `triage`, `remember` after
+`answer`. Both reach the store through `runtime.store`. This module holds
+the store's own shape: the namespace convention that makes it a privacy
+boundary (`profile_ns`), search over one customer's profile
+(`relevant_memories`, which `recall` calls), and the dev/prod backend swap
+(`build_dev_store`/`build_prod_store`), which mirrors Chapter 9's
+checkpointer swap: same interface, different backend, and `setup()` run
+once per release as a migration (`scripts/setup_store.py`), never on every
+process start.
+
+Namespace matching is the privacy boundary, and the backends differ.
+InMemoryStore matches a namespace prefix label by label. PostgresStore
+matches it as text: `search(("customer", "12"))` becomes `prefix LIKE
+'customer.12%'`, which also matches customer 123, and `_` or `%` inside an
+id are LIKE wildcards. So `profile_ns` refuses ids outside letters, digits,
+and hyphens, `relevant_memories` searches the complete three-label
+namespace, never the bare `("customer", customer_id)` prefix, and it keeps
+only items whose namespace is exactly that one. See
+tests/test_memory.py's 12-vs-123 tests.
 
 Chapter 14, "Advanced Memory: Extraction, Compaction, and LangMem", turns
 the store into a memory that learns. `CustomerFact`/`Extraction` and
 `extractor` are the structured-output extraction step (Chapter 7's
 `response_format` pattern, same shape as `atlas/triage.py`'s
-`triage_agent`) - candidate facts, never trusted until reconciled.
-`compact` is the reconciliation step: keyed by `fact.key`, it updates,
-skips duplicates, or overwrites, so the store holds one current value per
-key instead of an append-only log. `reflect` is the full pass - extract
-then compact - meant to run AFTER the response returns (a background task,
-a queue, or LangMem's `ReflectionExecutor`), never on the hot path. Note
-the different namespace: `compact`/`reflect` write to `("customer", cid,
-"facts")`, not `profile_ns`'s `"profile"` - this chapter's reconciled-fact
-store is deliberately separate from Chapter 13's simple profile store, not
-a replacement for it.
+`triage_agent`) - candidate facts, never trusted until checked and
+reconciled. `reflect` drops any candidate whose `source_turn` does not
+point at a real customer turn of the conversation, then hands the rest to
+`compact`, which reconciles them by `fact.key`: an identical value is
+skipped, anything else overwrites, so the profile holds one current value
+per key. `compact` writes into the same `profile_ns` namespace `remember`
+writes, so `recall` surfaces extracted facts on the customer's next thread
+with no change. `reflect` runs AFTER the response returns, never on the
+hot path: atlas/run.py's `run_and_reflect` submits it to a one-worker pool.
 
 `build_langmem_pipeline` is the "build vs. adopt" section's drop-in:
-`create_memory_store_manager` plus `ReflectionExecutor` do the same
-extract-then-compact-off-the-hot-path work as `reflect` above, as a
-LangMem primitive instead of hand-rolled code. LangMem is a `0.0.x`
-package (pinned exactly in `pyproject.toml`, per the chapter's caution
-about pre-1.0 dependencies in the memory layer) - isolated behind this one
-function so a breaking release touches this module, not every call site.
+`create_memory_store_manager` plus `ReflectionExecutor`. LangMem stores
+memories in its own format (`{"kind", "content"}` under random ids) and
+cannot read the facts `compact` writes, so it gets its own namespace,
+`("customer", "{customer_id}", "langmem")`, filled from the `configurable`
+dict passed to `submit` (`submit_langmem_reflection`). LangMem is a `0.0.x`
+package (pinned exactly in `pyproject.toml`), isolated behind these two
+functions so a breaking release touches this module, not every call site.
 Constructing `ReflectionExecutor` starts a live, non-daemon background
 worker thread immediately (not on first `.submit()`) - callers (and every
 test that builds one) must call `.shutdown()` when done, or the process
 never exits.
 """
 
+import re
+import typing
+from collections.abc import Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
-from typing import Iterator, Literal
+from typing import Literal
 
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ProviderStrategy
-from langgraph.store.base import BaseStore, IndexConfig
+from langchain_core.messages import AnyMessage
+from langgraph.store.base import BaseStore, IndexConfig, Item
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field
+
+if typing.TYPE_CHECKING:  # annotations only: langmem stays a lazy import
+    from langmem.knowledge.extraction import MemoryStoreManager
+    from langmem.reflection import LocalReflectionExecutor
 
 DB_URI = "postgresql://atlas:atlas@localhost:5432/atlas"
 
 
+SAFE_ID = re.compile(r"[A-Za-z0-9-]+")  # no ".", "%", or "_" in a label
+
+
 def profile_ns(customer_id: str) -> tuple[str, ...]:
     """The namespace for one customer's long-term profile. Scoping by
-    customer_id is the privacy boundary - a search in one customer's
-    namespace cannot return another's memory."""
+    customer_id is the privacy boundary, so an id that could widen a
+    match is refused, not stored."""
+    if not SAFE_ID.fullmatch(customer_id):
+        raise ValueError(f"unsafe customer id: {customer_id!r}")
     return ("customer", customer_id, "profile")
 
 
-def relevant_memories(store: BaseStore, customer_id: str, question: str) -> list:
-    """Semantic recall: the memories most relevant to the question, not just
-    an exact key match."""
-    return store.search(
-        ("customer", customer_id),
-        query=question,  # ranked by similarity when an index is configured
-        limit=5,  # cap to the retrieved slice - this is Chapter 12's budget
+def relevant_memories(store: BaseStore, customer_id: str, question: str) -> list[Item]:
+    """The profile entries most relevant to the question, from this
+    customer's namespace and no other."""
+    ns = profile_ns(customer_id)
+    hits = store.search(
+        ns,                      # the full namespace, never ("customer", id)
+        query=question,          # ranked by similarity when an index is configured
+        limit=5,                 # cap to the retrieved slice (Ch12's budget)
     )
+    return [item for item in hits if item.namespace == ns]   # exact match only
 
 
 def build_dev_store() -> InMemoryStore:
-    """Development: a dict in RAM, gone on restart, no infrastructure. The
-    dev/test default - exercises the exact `BaseStore` interface every node
-    uses, with no external service."""
+    """Development: a dict in RAM, gone on restart, no infrastructure.
+    The dev/test default - exercises the exact `BaseStore` interface every
+    node uses, with no external service."""
     return InMemoryStore()
 
 
 @contextmanager
 def build_prod_store(db_uri: str = DB_URI) -> Iterator[BaseStore]:
-    """Production: durable + semantic search. `IndexConfig` is what turns
-    `search`'s `query` from a no-op into semantic recall: `embed` is the
-    embedding function, `dims` must match that model's output dimension
-    (1536 for text-embedding-3-small), and `fields` selects which parts of
-    each memory to embed. Get `dims` wrong and writes and queries land in
-    different vector spaces; recall silently returns nothing useful.
+    """Production: durable + semantic search.
 
+    `IndexConfig` is what turns `search`'s `query` from a no-op into
+    semantic recall: `embed` is the embedding function, `dims` must match
+    that model's output dimension (1536 for text-embedding-3-small), and
+    `fields` selects which parts of each memory to embed. The vector column
+    is created `dims` wide, so a mismatched model fails loudly at the first
+    write; the silent failure is a different model with the same width.
+
+    No `setup()` here: the tables, the vector index, and the pgvector
+    extension are created once per release by `scripts/setup_store.py`, as
+    Chapter 9's `scripts/setup_checkpointer.py` does for the checkpointer.
     Requires a live Postgres instance and embedding-provider credentials -
-    the external-service exception (see tests/test_memory.py), not part of
-    the seeded, mockable default path."""
+    the external-service exception (see tests/test_memory.py)."""
     from langchain.embeddings import init_embeddings
     from langgraph.store.postgres import PostgresStore
 
@@ -102,8 +134,7 @@ def build_prod_store(db_uri: str = DB_URI) -> Iterator[BaseStore]:
         db_uri,
         index=IndexConfig(embed=embeddings, dims=1536, fields=["$"]),
     ) as store:
-        store.setup()  # create tables + the vector index (a migration step)
-        yield store
+        yield store      # compile the graph with store=store
 
 
 class CustomerFact(BaseModel):
@@ -118,64 +149,80 @@ class CustomerFact(BaseModel):
 
 
 class Extraction(BaseModel):
-    """Container so the schema is a single model, not a bare list - a bare
-    list response_format is provider-dependent."""
+    """Container so the schema is a single model, not a bare list.
+    A bare-list response_format is provider-dependent."""
 
     facts: list[CustomerFact] = Field(default_factory=list)
 
 
-EXTRACTION_PROMPT = (
-    "Extract only facts the customer explicitly stated. Do not infer or "
-    "guess. If nothing durable was said, return no facts."
-)
-
+# Extraction decides what to remember; it does not act, so it has no tools.
 extractor = create_agent(
     model="claude-sonnet-4-6",
-    tools=[],  # extraction decides what to remember; it does not act
+    tools=[],
     response_format=ProviderStrategy(Extraction),
-    system_prompt=EXTRACTION_PROMPT,
+    system_prompt=(
+        "Extract only facts the customer explicitly stated. Do not infer or "
+        "guess. If nothing durable was said, return no facts."
+    ),
 )
 
 
-def compact(store: BaseStore, customer_id: str, candidates: list[CustomerFact]) -> None:
+def compact(
+    store: BaseStore, customer_id: str, candidates: list[CustomerFact]
+) -> None:
     """Reconcile candidates against stored facts: one current value per key,
     not an append-only log."""
-    ns = ("customer", customer_id, "facts")
+    ns = profile_ns(customer_id)        # the profile recall already reads
     for fact in candidates:
         existing = store.get(ns, fact.key)
         if existing and existing.value["value"] == fact.value:
-            continue  # duplicate - skip
-        store.put(ns, fact.key, fact.model_dump())  # insert or overwrite
+            continue                                   # duplicate - skip
+        store.put(ns, fact.key, fact.model_dump())     # insert or overwrite
 
 
-def reflect(store: BaseStore, customer_id: str, messages: list) -> None:
-    """The full reflection pass - extract then compact. Runs AFTER the
-    response, scheduled off the hot path (a background task, a queue, or
-    LangMem's ReflectionExecutor - see `build_langmem_pipeline` below)."""
+def reflect(store: BaseStore, customer_id: str, messages: list[AnyMessage]) -> None:
+    """The full reflection pass - extract, check, compact. Runs AFTER the
+    response, scheduled off the hot path."""
     result = extractor.invoke({"messages": messages})
-    compact(store, customer_id, result["structured_response"].facts)
+    sourced = [
+        fact
+        for fact in result["structured_response"].facts
+        if 0 <= fact.source_turn < len(messages)
+        and messages[fact.source_turn].type == "human"   # a real customer turn
+    ]
+    compact(store, customer_id, sourced)
 
 
-def build_langmem_pipeline(store: BaseStore):
+def build_langmem_pipeline(
+    store: BaseStore,
+) -> tuple["MemoryStoreManager", "LocalReflectionExecutor"]:
     """The "build vs. adopt" section's LangMem drop-in for the hand-rolled
-    extractor/compact/reflect pipeline above (Exercise 3: swap it in, then
-    write the build-vs-adopt decision note). `create_memory_store_manager`
-    runs extraction and reconciliation against a `BaseStore` in one call;
-    `ReflectionExecutor` is the background-reflection move as a first-class
-    primitive - its `.submit(...)` schedules the memory work and returns
-    immediately, so the caller's response never waits on it.
-
-    Requires the `langmem` package (pinned to an exact 0.0.x version in
-    pyproject.toml - see the module docstring's caution). Returns
-    `(manager, reflection)`; call `reflection.shutdown()` when done with
-    it - constructing `ReflectionExecutor` starts a live worker thread
-    immediately, and that thread keeps the process alive until shut down."""
+    extractor/compact/reflect pipeline above (Exercise 3). Returns
+    `(manager, reflection)`; call `reflection.shutdown()` when done -
+    constructing `ReflectionExecutor` starts a live worker thread
+    immediately, and that thread keeps the process alive until shut down.
+    LangMem writes its own format, so it gets its own namespace."""
     from langmem import ReflectionExecutor, create_memory_store_manager
 
     manager = create_memory_store_manager(
         "claude-sonnet-4-6",
-        namespace=("customer", "{customer_id}", "facts"),
+        namespace=("customer", "{customer_id}", "langmem"),
         store=store,
     )
     reflection = ReflectionExecutor(manager, store=store)
     return manager, reflection
+
+
+def submit_langmem_reflection(
+    reflection: "LocalReflectionExecutor", customer_id: str, result: dict
+) -> Future:
+    """Defer LangMem's memory work for one customer. `{customer_id}` in the
+    manager's namespace is a template filled from this `configurable` dict;
+    without a config, `submit` outside a graph run raises ValueError. Log
+    the returned Future: a failed reflection raises nowhere else."""
+    # After the turn returns, defer the memory work for this customer:
+    return reflection.submit(
+        {"messages": result["messages"]},
+        config={"configurable": {"customer_id": customer_id}},
+        after_seconds=0,
+    )

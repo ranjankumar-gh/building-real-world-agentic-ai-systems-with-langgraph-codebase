@@ -39,6 +39,14 @@ Chapter 12, "Context Engineering", is the first reader of `Doc.score`
 (declared in Chapter 5, set by the retriever): `atlas/context.py`'s
 `select_docs` ranks retrieved documents on it and caps them to the retrieved
 slice of the context budget.
+
+Chapter 13, "Short-Term vs Long-Term Memory", adds `customer_profile`, the
+channel `atlas/graph.py`'s `recall` writes before `triage`: the profile
+entries the store holds for the ticket's customer, key to value. The
+declaration is required - LangGraph drops a write to an undeclared key
+without an error (Chapter 6). Additive like `refund_done`: a run with no
+customer on its ticket never writes it, so read it with
+`state.get("customer_profile", {})`.
 """
 
 from typing import Annotated, TypedDict
@@ -78,3 +86,4 @@ class AtlasState(TypedDict):
     error: str | None  # why the run escalated; triage clears it
     refund_done: bool  # NEW this chapter - additive, read with a default
     approval: dict | None  # Chapter 11: who decided the refund, and when
+    customer_profile: dict[str, str]  # Chapter 13: recall loads it before triage

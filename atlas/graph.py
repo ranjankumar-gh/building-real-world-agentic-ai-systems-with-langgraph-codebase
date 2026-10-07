@@ -92,18 +92,36 @@ re-runs from the top (see the chapter's "gotcha" callout), `approval_gate`
 does nothing but interrupt and route - no side effect lives here, the same
 membrane discipline Chapter 10 established for `refund` itself.
 
-Chapter 13, "Short-Term vs Long-Term Memory", adds `remember` and `recall` -
+Chapter 12, "Context Engineering", makes the retrieved slice real on the
+answer path: `answer` passes `state["retrieved"]` through
+`atlas/context.py`'s `select_docs` with `BUDGET.retrieved` before composing
+the reply, so the best-scored documents that fit the slice reach the reply
+and the rest are dropped. (A `resolve_node` mounted at "answer" through
+`build_graph`, Chapter 17's pattern, replaces this function and with it the
+cap; the mounted agent's own `ContextBudget` bounds history only.)
+
+Chapter 13, "Short-Term vs Long-Term Memory", adds `recall` and `remember` -
 the node-facing side of the cross-thread store (`atlas/memory.py` holds the
 store's own shape: `profile_ns`, `relevant_memories`, the dev/prod backend
-swap). Both reach the store through `runtime.store`, the same `Runtime`
-handle every node and middleware already receives - `remember` persists a
-durable customer fact that outlives the thread; `recall` reads it back at
-the start of a fresh one. Like `retrieve_async` and `triage_with_command`
-before them, they are defined and unit-tested here but not wired into
-`builder` below: the chapter's point is the mechanism itself (checkpointer
-vs. store, thread-scoped vs. namespace-scoped), not a specific place in
-Atlas's routing topology to call it - that integration is left to
-Chapter 14, once extraction decides *what* is worth remembering.
+swap) - and wires both into Atlas. Both reach the store through
+`runtime.store`, the same `Runtime` handle every node already receives.
+`recall` runs first on every turn (START -> recall -> triage): it loads the
+customer's profile entries most relevant to the new question into
+`customer_profile` before anything reasons about the turn. `remember` runs
+after `answer` (answer -> remember -> END), the one path where Atlas
+resolved the question itself: it records the issue this ticket raised under
+the profile's `last_issue` key, so the customer's next thread starts with
+it. The escalate and refund paths end without it: `escalate` overwrites
+`ticket` (dropping `customer_id`), and a refund is already recorded by the
+payment backend and the Chapter 11 approval record. The customer comes from
+`ticket["customer_id"]`, which the support system's input carries (see
+atlas/run.py's `inputs`); a run with no customer on its ticket (Chapter 9's
+two-turn example sends none) skips both nodes' store calls.
+
+Chapter 14, "Advanced Memory: Extraction, Compaction, and LangMem", adds no
+node: reflection runs after the graph returns, off the hot path
+(atlas/run.py's `run_and_reflect`), and writes extracted facts into the
+same profile namespace, so `recall` above loads them on the next thread.
 
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", mounts
 `atlas/research.py`'s compiled `research_graph` as a node. `AtlasState` and
@@ -113,10 +131,10 @@ mounted directly - `research` below is the wrapping node the chapter shows
 for exactly that case, adapting in with `derive_sources` and back out with
 `summarize_findings`. `derive_sources` reads from `ticket`, the same
 free-form per-request dict `approval_gate`/`refund` already read
-ticket-scoped data from. Like `remember`/`recall` before it, `research` is
-added to `builder` (the chapter's own code calls `add_node`) but is not
-wired into `route_from_triage`'s edges - the chapter names the node, not a
-place in the routing topology to reach it from.
+ticket-scoped data from. `research` is added to `builder` (the chapter's
+own code calls `add_node`) but is not wired into `route_from_triage`'s
+edges - the chapter names the node, not a place in the routing topology to
+reach it from.
 
 Chapter 21, "Evaluation and Testing", factors the builder-assembly wiring out
 into `_make_builder` and adds `build_graph(model=...)` on top of it - a
@@ -140,9 +158,10 @@ from langgraph.runtime import Runtime
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Overwrite, RetryPolicy, TimeoutPolicy, interrupt
 
+from atlas.context import BUDGET, select_docs
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
-from atlas.memory import profile_ns
+from atlas.memory import profile_ns, relevant_memories
 from atlas.research import research_graph
 from atlas.state import AtlasState
 from atlas.tools import KnowledgeBaseUnavailable
@@ -248,7 +267,10 @@ def route_after_retrieve(
 
 
 def answer(state: AtlasState) -> dict:
-    reply = compose_answer(state["messages"], state["retrieved"])
+    """Chapter 12: only the best-scored documents that fit the retrieved
+    slice reach the reply - fetching ten does not mean using ten."""
+    docs = select_docs(state["retrieved"], BUDGET.retrieved)
+    reply = compose_answer(state["messages"], docs)
     # compose_answer returns a str, and add_messages coerces a bare str into a
     # HumanMessage - wrap it so the reply is recorded as the assistant's turn.
     return {"messages": [AIMessage(content=reply)]}
@@ -348,24 +370,30 @@ def refund_failed(state: AtlasState) -> Command:
     )
 
 
-def remember(state: AtlasState, runtime: Runtime) -> dict:
-    """Chapter 13: persist a durable fact about the customer - crosses no
-    membrane, but outlives the thread. Not wired into `builder` below (see
-    the module docstring's Chapter 13 paragraph) - unit-tested directly in
-    tests/test_graph.py against a `Runtime` built on `InMemoryStore`."""
-    cid = state["ticket"]["customer_id"]
-    runtime.store.put(profile_ns(cid), "plan", {"tier": "enterprise"})
-    return {}
-
-
 def recall(state: AtlasState, runtime: Runtime) -> dict:
-    """Chapter 13: load the customer's profile into state at the start of a
-    thread, so a returning customer is not a stranger. See `remember`
-    above."""
-    cid = state["ticket"]["customer_id"]
-    item = runtime.store.get(profile_ns(cid), "plan")
-    plan = item.value["tier"] if item else "unknown"
-    return {"customer_plan": plan}
+    """Load what the store knows about this customer before triage, so a
+    returning customer is not a stranger."""
+    ticket = state.get("ticket") or {}
+    if "customer_id" not in ticket:
+        return {}                     # no customer on the ticket: nothing to load
+    question = state["messages"][-1].text           # the turn that just arrived
+    found = relevant_memories(runtime.store, ticket["customer_id"], question)
+    return {"customer_profile": {item.key: item.value["value"] for item in found}}
+
+
+def remember(state: AtlasState, runtime: Runtime) -> dict:
+    """After the answer, record the issue this ticket raised - a durable
+    fact about the customer that outlives the thread."""
+    ticket = state.get("ticket") or {}
+    if "customer_id" not in ticket:
+        return {}
+    question = next(m.text for m in reversed(state["messages"]) if m.type == "human")
+    runtime.store.put(
+        profile_ns(ticket["customer_id"]),
+        "last_issue",
+        {"value": question, "ticket": ticket.get("id")},
+    )
+    return {}
 
 
 def derive_sources(state: AtlasState) -> list[str]:
@@ -409,6 +437,10 @@ def _make_builder(
     the `resolve_node` seam for mounting a middleware-equipped agent in the
     answering position; see Chapter 17's mounting section for the pattern."""
     b = StateGraph(AtlasState)
+    # Chapter 13: memory on both sides of the turn - recall before triage,
+    # remember after answer. Store calls only; no retry_policy needed.
+    b.add_node("recall", recall)
+    b.add_node("remember", remember)
     b.add_node(
         "triage",
         triage_node,
@@ -456,7 +488,8 @@ def _make_builder(
     # paragraph.
     b.add_node("research", research)
 
-    b.add_edge(START, "triage")
+    b.add_edge(START, "recall")
+    b.add_edge("recall", "triage")
     # Chapter 11: triage's "refund" route now lands on the approval gate, not
     # on refund directly - the gate decides whether refund ever runs.
     # ALLOWED_ROUTES and route_from_triage are unchanged; only the physical
@@ -472,7 +505,8 @@ def _make_builder(
         },
     )
     b.add_conditional_edges("retrieve", route_after_retrieve)  # cycle + exit
-    b.add_edge("answer", END)
+    b.add_edge("answer", "remember")
+    b.add_edge("remember", END)
     b.add_edge("escalate", END)
     b.add_edge("refund", END)
     # approval_gate has no static outgoing edge - it always returns a
@@ -526,7 +560,8 @@ builder = _make_builder(triage)
 #
 # Chapter 13 configures the store BESIDE the checkpointer, not instead of it:
 # they do different jobs (in-thread state vs cross-thread facts). Passing it
-# here is what makes `runtime.store` non-None inside `remember`/`recall`.
+# here is what makes `runtime.store` non-None inside `recall`/`remember`;
+# `graph.store` is the same instance (atlas/run.py's reflection writes to it).
 graph = builder.compile(checkpointer=InMemorySaver(), store=InMemoryStore())
 
 DB_URI = "postgresql://atlas:atlas@localhost:5432/atlas"

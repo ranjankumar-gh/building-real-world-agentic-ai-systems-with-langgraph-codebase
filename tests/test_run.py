@@ -13,6 +13,9 @@ Chapter 11, "Human-in-the-Loop", adds `run_to_approval` and
 `resume_approval` - the thread-scoped suspend/resume shape for the
 approval gate in `atlas/graph.py`.
 
+Chapter 14, "Advanced Memory", adds `run_and_reflect`: the reply returns
+before reflection runs, and the next thread recalls what it extracted.
+
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds `run_research` -
 "Bound the fan-out": `max_concurrency` is set on the invoke config, not the
 graph, so the same `research_graph` can be called with a different bound
@@ -352,3 +355,66 @@ def test_the_chapter_10_inputs_run_end_to_end_through_the_refund(monkeypatch):
     assert result["refund_done"] is True
     assert result["messages"][-1].content == "Refund of $49.00 issued for T-1001."
     assert result["approval"]["by"] == "lead@example.com"
+    # The ticket now names its customer (Chapter 13), so recall ran first.
+    assert first["customer_profile"] == {}  # C-1's first ticket: nothing known yet
+
+
+def test_run_and_reflect_returns_first_and_the_next_thread_recalls_the_fact(
+    monkeypatch,
+):
+    """Chapter 14's placement: `run_and_reflect` returns the graph's result
+    while reflection is still blocked, so the reply never waits on it; once
+    the one-worker pool runs `reflect` (extractor patched, no model call),
+    the customer's NEXT thread recalls the extracted fact through Chapter
+    13's `recall`, alongside the issue `remember` stored."""
+    import threading
+
+    from langchain_core.messages import HumanMessage
+
+    from atlas import memory as memory_module
+    from atlas import run as run_module
+    from atlas.memory import CustomerFact, Extraction, profile_ns
+
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    hit = {"id": "kb:email", "text": "Updated your contact settings.", "score": 1.0}
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [hit])
+
+    release = threading.Event()
+
+    def slow_extract(payload: dict) -> dict:
+        release.wait(timeout=10)  # reflection cannot finish before we allow it
+        fact = CustomerFact(
+            key="contact_preference", value="email only",
+            kind="preference", source_turn=0,
+        )
+        return {"structured_response": Extraction(facts=[fact])}
+
+    monkeypatch.setattr(memory_module.extractor, "invoke", slow_extract)
+    customer = "C-reflect"
+    first_input = {
+        "messages": [HumanMessage("Email me, never phone.")],
+        "ticket": {"id": "T-31", "amount": 0.0, "customer_id": customer},
+    }
+
+    result = run_module.run_and_reflect("test-thread-reflect-1", first_input)
+
+    assert result["messages"][-1].content.startswith("Updated your contact settings.")
+    store = graph_module.graph.store
+    assert store.get(profile_ns(customer), "contact_preference") is None  # not yet
+    release.set()
+    run_module.reflection_pool.submit(lambda: None).result(timeout=10)  # drain
+
+    second = graph_module.graph.invoke(
+        {
+            "messages": [HumanMessage("Any update?")],
+            "ticket": {"id": "T-32", "amount": 0.0, "customer_id": customer},
+        },
+        {"configurable": {"thread_id": "test-thread-reflect-2"}},
+    )
+
+    assert second["customer_profile"] == {
+        "last_issue": "Email me, never phone.",
+        "contact_preference": "email only",
+    }

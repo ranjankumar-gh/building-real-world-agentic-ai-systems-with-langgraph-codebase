@@ -10,8 +10,19 @@ rewrites the request, `before_model` would mutate persisted state).
 
 `select_docs` is the hot-path half of *select*: rank retrieved documents by
 score and cap them to the retrieved slice, instead of handing the model
-every document `atlas.graph`'s `retrieve` node fetched. The richer,
-long-term-memory half of select is Chapters 13-14.
+every document `atlas.graph`'s `retrieve` node fetched. `atlas.graph`'s
+`answer` node calls it on `state["retrieved"]` with `BUDGET.retrieved`, so
+the retrieved slice is enforced on the answer path, not only declared. The
+richer, long-term-memory half of select is Chapters 13-14.
+
+`BUDGET` is Atlas's one allocation (history=4000, retrieved=2000), shared by
+`ContextBudget` on `resolve_agent` (atlas/agent.py) and by `answer`, so the
+two slices cannot drift apart.
+
+The trim passes no `include_system`: `ModelRequest.messages` excludes the
+system message (`create_agent` carries it as `request.system_message` and
+prepends it only when it calls the model), so there is no system prompt in
+the list to keep, and the prompt never counts against `history`.
 
 `atlas/state.py`'s `Doc` has carried `score: float` since Chapter 5 (set
 by the retriever); `select_docs` is its first reader."""
@@ -35,6 +46,9 @@ class Budget:
     retrieved: int  # reserved for retrieved documents
 
 
+BUDGET = Budget(history=4000, retrieved=2000)  # Atlas's allocation
+
+
 class ContextBudget(AgentMiddleware):
     """Enforce the budget on every model call - without deleting anything
     from persisted state."""
@@ -52,8 +66,7 @@ class ContextBudget(AgentMiddleware):
             max_tokens=self.budget.history,
             token_counter=count_tokens_approximately,
             strategy="last",  # keep the most recent turns
-            start_on="human",  # never start on a dangling ToolMessage
-            include_system=True,  # always keep the system prompt
+            start_on="human",
         )
         return handler(request.override(messages=trimmed))
 

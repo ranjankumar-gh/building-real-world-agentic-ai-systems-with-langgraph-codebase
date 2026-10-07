@@ -31,17 +31,15 @@ the middleware argument is the only thing this chapter's increment changes
 about `resolve_agent`.
 
 Chapter 12, "Context Engineering", adds `ContextBudget` (see
-"Compose with summarization"). The chapter's own snippet builds an
-illustrative `resolve_agent` from just two middleware -
-`ContextBudget(Budget(history=4000, retrieved=2000))` and a
-`SummarizationMiddleware` configured identically to `atlas/middleware.py`'s
-existing `summarizer` - to show the two composing in isolation. Folded into
-the REAL, cumulative `resolve_agent` below, that reuses the existing
-`summarizer` instance rather than constructing a second
-`SummarizationMiddleware`: `create_agent` identifies middleware by class
-alone for any type without a further discriminator (the same rule Chapter
-8's `pii_type` collision illustrated for `PIIMiddleware`), so two separate
-`SummarizationMiddleware` instances - even with identical config - collide
+"Compose with summarization"). The chapter's own snippet shows the
+cumulative stack at that chapter, `[pii, context_budget, summarizer,
+AuthorityGate(), approval]`, with `context_budget = ContextBudget(BUDGET)`;
+the model binding it prints is the string id, for brevity. The REAL
+`resolve_agent` below reuses the existing `summarizer` instance rather than
+constructing a second `SummarizationMiddleware`: `create_agent`
+identifies middleware by class alone for any type without a further
+discriminator (the same rule Chapter 8's `pii_type` collision illustrated
+for `PIIMiddleware`), so two separate `SummarizationMiddleware` instances - even with identical config - collide
 with `AssertionError: Please remove duplicate middleware instances.`
 `ContextBudget` is the first `wrap_model_call` hook in the stack; it wraps
 the model invocation itself, which always runs after every `before_model`
@@ -74,7 +72,7 @@ from langsmith import trace
 
 from atlas.audit import AuditGate
 from atlas.containment import RevocationGate
-from atlas.context import Budget, ContextBudget
+from atlas.context import BUDGET, ContextBudget
 from atlas.cost import TenantBudgetGuard
 from atlas.memory import build_dev_store
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
@@ -103,8 +101,9 @@ def build_resolve_agent_from_model_id(model_id: str = "claude-sonnet-4-6"):
 model = init_chat_model("claude-sonnet-4-6", temperature=0, max_tokens=1024)
 
 # Chapter 12: the explicit per-turn context budget. See "Enforcing the
-# budget" - history=4000, retrieved=2000 matches the chapter's own numbers.
-context_budget = ContextBudget(Budget(history=4000, retrieved=2000))
+# budget" - BUDGET (history=4000, retrieved=2000) lives in atlas/context.py,
+# shared with atlas/graph.py's `answer`, which caps retrieved docs to it.
+context_budget = ContextBudget(BUDGET)
 
 # Chapter 13 / Chapter 23 dev default - the same swap-for-prod pattern
 # atlas/memory.py already establishes, reused here rather than duplicated:

@@ -65,12 +65,9 @@ def test_context_budget_keeps_the_view_under_the_history_slice():
     budget.wrap_model_call(request, lambda r: captured.append(r) or "ok")
 
     trimmed = captured[0].messages
-    # include_system=True means the system prompt itself is folded into the
-    # counted window - trim_messages guarantees the token ceiling, not that
-    # every non-system message counts toward it independently.
-    assert count_tokens_approximately(trimmed) <= 200 + count_tokens_approximately(
-        [SystemMessage("You are Atlas.")]
-    )
+    # The system prompt is not in request.messages, so it is not counted:
+    # the trimmed history alone stays under the history slice.
+    assert count_tokens_approximately(trimmed) <= 200
     assert len(trimmed) < len(request.messages)
 
 
@@ -173,3 +170,36 @@ def test_select_docs_never_exceeds_the_token_budget():
 
     total = sum(count_tokens_approximately([HumanMessage(d["text"])]) for d in kept)
     assert total <= 40
+
+
+def test_the_system_prompt_travels_outside_request_messages_in_a_real_agent():
+    """Why ContextBudget passes no `include_system`: inside a real
+    `create_agent` run, `request.messages` holds no SystemMessage - the
+    prompt rides on `request.system_message` and is prepended only when the
+    model is called. So the trim can neither drop it nor count it."""
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+
+    seen = {}
+
+    class Record(AgentMiddleware):
+        def wrap_model_call(self, request, handler):
+            seen["messages"] = list(request.messages)
+            seen["system"] = request.system_message
+            return handler(request)
+
+    model = FakeMessagesListChatModel(responses=[AIMessage("done")])
+    agent = create_agent(
+        model=model,
+        tools=[],
+        system_prompt="You are Atlas.",
+        middleware=[ContextBudget(Budget(history=40, retrieved=500)), Record()],
+    )
+    agent.invoke({"messages": _long_conversation(turns=10) + [HumanMessage("hi")]})
+
+    assert not any(isinstance(m, SystemMessage) for m in seen["messages"])
+    assert seen["system"].content == "You are Atlas."
+    assert count_tokens_approximately(seen["messages"]) <= 40

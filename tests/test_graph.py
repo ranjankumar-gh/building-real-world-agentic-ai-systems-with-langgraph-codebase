@@ -42,13 +42,22 @@ monkeypatching `interrupt` - the same style already used for `classify` and
 real suspend/resume round trip. The end-to-end tests further down drive the
 REAL `interrupt()`/`Command(resume=...)` cycle through the compiled graph,
 proving the suspension is real (the run returns with `result["__interrupt__"]`
-set) and that resuming lands exactly where the chapter promises."""
+set) and that resuming lands exactly where the chapter promises.
+
+Chapter 12, "Context Engineering": `answer` caps `state["retrieved"]` to
+`BUDGET.retrieved` with `select_docs` before composing the reply.
+
+Chapter 13, "Short-Term vs Long-Term Memory": `recall` runs before `triage`
+and `remember` after `answer`. The node tests below call them directly
+against a `Runtime` on `InMemoryStore`; the cross-thread tests drive the
+compiled graph through two conversations for one customer and a third for
+a different customer whose id shares a prefix (12 vs 123)."""
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
@@ -57,6 +66,7 @@ from langgraph.types import Command, Overwrite
 
 from atlas import graph as graph_module
 from atlas.breaks import ScriptedModel
+from atlas.context import BUDGET
 from atlas.effects import RefundError
 from atlas.graph import (
     ALLOWED_ROUTES,
@@ -254,14 +264,40 @@ def test_answer_calls_compose_answer_and_wraps_its_result_in_a_delta(monkeypatch
     monkeypatch.setattr(
         graph_module, "compose_answer", lambda messages, retrieved: "reply"
     )
+    hit = {"id": "kb:1", "text": "Refunds take 5 days.", "score": 1.0}
 
-    delta = answer(_state(messages=["hi"], retrieved=["hit-1"]))
+    delta = answer(_state(messages=["hi"], retrieved=[hit]))
 
     # Wrapped in an AIMessage: add_messages would coerce a bare str into a
     # HumanMessage and file Atlas's answer as a user turn.
     [message] = delta["messages"]
     assert isinstance(message, AIMessage)
     assert message.content == "reply"
+
+
+def test_answer_enforces_the_retrieved_slice_with_select_docs(monkeypatch):
+    """Chapter 12: the retrieved slice is enforced, not only declared.
+    Three documents of about 1,500 tokens each against BUDGET.retrieved
+    (2,000): only the highest-scored one fits, so it is the only one
+    compose_answer ever sees - whatever order `retrieved` holds them in."""
+    seen = {}
+
+    def fake_compose(messages, retrieved):
+        seen["docs"] = retrieved
+        return "reply"
+
+    monkeypatch.setattr(graph_module, "compose_answer", fake_compose)
+    big = "x" * 6000  # about 1,500 tokens at four characters per token
+    docs = [
+        {"id": "low", "text": big, "score": 0.2},
+        {"id": "best", "text": big, "score": 0.9},
+        {"id": "mid", "text": big, "score": 0.5},
+    ]
+    assert BUDGET.retrieved == 2000
+
+    answer(_state(messages=["hi"], retrieved=docs))
+
+    assert [d["id"] for d in seen["docs"]] == ["best"]
 
 
 def test_retrieve_async_offloads_the_blocking_call_via_asyncio_to_thread(monkeypatch):
@@ -275,41 +311,69 @@ def test_retrieve_async_offloads_the_blocking_call_via_asyncio_to_thread(monkeyp
     assert delta == {"retrieved": ["hit-1"]}
 
 
-def test_remember_persists_a_durable_customer_fact_to_the_store():
+def _conversation(question: str, reply: str = "Here is what to try.") -> list:
+    return [HumanMessage(question), AIMessage(reply)]
+
+
+def test_remember_persists_the_tickets_issue_to_the_customers_profile():
     """Chapter 13: `remember` writes through `runtime.store`, not through
-    the checkpointer - it reaches the store the same way every node does."""
+    the checkpointer, under the profile's `last_issue` key."""
     store = InMemoryStore()
     runtime = Runtime(store=store)
-    state = _state(ticket={"id": "T-1001", "customer_id": "cust-1"})
+    state = _state(
+        messages=_conversation("My integration keeps failing."),
+        ticket={"id": "T-1001", "customer_id": "cust-1"},
+    )
 
     delta = remember(state, runtime)
 
-    assert delta == {}  # no state channel changes - the store, not state, holds the fact
-    item = store.get(profile_ns("cust-1"), "plan")
-    assert item.value == {"tier": "enterprise"}
+    assert delta == {}  # no state channel changes - the store, not state, holds it
+    item = store.get(profile_ns("cust-1"), "last_issue")
+    assert item.value == {"value": "My integration keeps failing.", "ticket": "T-1001"}
 
 
-def test_recall_reads_a_previously_remembered_fact_on_a_fresh_thread():
+def test_recall_loads_a_remembered_issue_into_customer_profile():
     """Exercise 1: write in one thread, read back on what is logically a new
     one - `recall` never touches thread_id, only the customer's namespace."""
     store = InMemoryStore()
     runtime = Runtime(store=store)
-    state = _state(ticket={"id": "T-1001", "customer_id": "cust-1"})
-    remember(state, runtime)
+    first = _state(
+        messages=_conversation("My integration keeps failing."),
+        ticket={"id": "T-1001", "customer_id": "cust-1"},
+    )
+    remember(first, runtime)
+    second = _state(
+        messages=[HumanMessage("It's happening again.")],
+        ticket={"id": "T-1002", "customer_id": "cust-1"},
+    )
 
-    delta = recall(state, runtime)
+    delta = recall(second, runtime)
 
-    assert delta == {"customer_plan": "enterprise"}
+    expected = {"last_issue": "My integration keeps failing."}
+    assert delta == {"customer_profile": expected}
 
 
-def test_recall_returns_unknown_when_the_store_has_never_seen_this_customer():
+def test_recall_returns_an_empty_profile_for_a_customer_never_seen():
     store = InMemoryStore()
     runtime = Runtime(store=store)
-    state = _state(ticket={"id": "T-2002", "customer_id": "cust-never-seen"})
+    state = _state(
+        messages=[HumanMessage("hi")],
+        ticket={"id": "T-2002", "customer_id": "cust-never-seen"},
+    )
 
-    delta = recall(state, runtime)
+    assert recall(state, runtime) == {"customer_profile": {}}
 
-    assert delta == {"customer_plan": "unknown"}
+
+def test_recall_and_remember_skip_a_ticket_with_no_customer():
+    """Chapter 9's two-turn example sends no ticket at all, and Chapter 10's
+    refund tests send one without a customer: both must still run."""
+    runtime = Runtime(store=InMemoryStore())
+    no_ticket = _state(messages=_conversation("hi"))
+    no_customer = _state(messages=_conversation("hi"), ticket={"id": "T-1"})
+
+    for state in (no_ticket, no_customer):
+        assert recall(state, runtime) == {}
+        assert remember(state, runtime) == {}
 
 
 def test_recall_never_returns_a_different_customers_memory():
@@ -317,11 +381,93 @@ def test_recall_never_returns_a_different_customers_memory():
     facts never cross, because the namespace is keyed by customer_id."""
     store = InMemoryStore()
     runtime = Runtime(store=store)
-    remember(_state(ticket={"id": "T-1", "customer_id": "cust-a"}), runtime)
+    remember(
+        _state(
+            messages=_conversation("billing question"),
+            ticket={"id": "T-1", "customer_id": "cust-a"},
+        ),
+        runtime,
+    )
 
-    delta = recall(_state(ticket={"id": "T-2", "customer_id": "cust-b"}), runtime)
+    delta = recall(
+        _state(
+            messages=[HumanMessage("hi")],
+            ticket={"id": "T-2", "customer_id": "cust-b"},
+        ),
+        runtime,
+    )
 
-    assert delta == {"customer_plan": "unknown"}  # cust-b has no memory of its own
+    assert delta == {"customer_profile": {}}  # cust-b has no memory of its own
+
+
+def _ticket_input(question: str, ticket_id: str, customer_id: str) -> dict:
+    """atlas/run.py's `inputs` shape: the message plus a ticket that names
+    its customer."""
+    return {
+        "messages": [{"role": "user", "content": question}],
+        "ticket": {"id": ticket_id, "amount": 49.0, "customer_id": customer_id},
+    }
+
+
+def test_a_second_conversation_sees_the_first_and_another_customer_does_not(
+    monkeypatch,
+):
+    """Gate decision 2, end to end through the compiled graph: conversation
+    one (thread t1) for customer 12 is answered and remembered; conversation
+    two (thread t2, a fresh checkpoint lineage) for the same customer starts
+    with that issue in `customer_profile`; conversation three for customer
+    123 - an id that shares customer 12's text prefix - starts with an empty
+    profile. Only `classify` (the live model call) and the KB are stubbed."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    hit = {"id": "kb:sync", "text": "Re-run the sync from Settings.", "score": 1.0}
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [hit])
+    g = build_graph()
+
+    first = g.invoke(
+        _ticket_input("My integration keeps failing.", "T-1", "12"),
+        {"configurable": {"thread_id": "t1"}},
+    )
+    second = g.invoke(
+        _ticket_input("It's happening again.", "T-2", "12"),
+        {"configurable": {"thread_id": "t2"}},
+    )
+    third = g.invoke(
+        _ticket_input("My integration keeps failing.", "T-3", "123"),
+        {"configurable": {"thread_id": "t3"}},
+    )
+
+    assert first["customer_profile"] == {}  # nothing known yet
+    assert second["customer_profile"] == {
+        "last_issue": "My integration keeps failing."
+    }
+    assert len(second["messages"]) == 2  # a new thread: no history carried over
+    assert third["customer_profile"] == {}  # customer 123 sees nothing of 12's
+    assert g.store.get(profile_ns("12"), "last_issue").value["ticket"] == "T-2"
+
+
+def test_recall_runs_before_triage_and_remember_after_answer(monkeypatch):
+    """The two placements, read off the compiled run: the stream's node order
+    for one answered turn is recall, triage, retrieve, answer, remember."""
+    monkeypatch.setattr(
+        graph_module, "classify", lambda messages: _decision("retrieve")
+    )
+    hit = {"id": "kb:1", "text": "Try again.", "score": 1.0}
+    monkeypatch.setattr(graph_module, "search_kb", lambda messages: [hit])
+    g = build_graph()
+
+    order = [
+        name
+        for chunk in g.stream(
+            _ticket_input("Where is my order?", "T-9", "C-1"),
+            {"configurable": {"thread_id": "t-order"}},
+            stream_mode="updates",
+        )
+        for name in chunk
+    ]
+
+    assert order == ["recall", "triage", "retrieve", "answer", "remember"]
 
 
 def test_graph_compiles_with_the_chapter_3_branching_topology():
@@ -330,10 +476,11 @@ def test_graph_compiles_with_the_chapter_3_branching_topology():
     checkpoint-membrane crossing - and its `error_handler` shows up as an
     internal `__error_handler__refund` pseudo-node, filtered out here the
     same way `__start__`/`__end__` are. Chapter 11 adds `approval_gate`,
-    sitting in front of `refund`. Chapter 17 adds `research`, the mounted
-    map-reduce subgraph - present as a node but, like `remember`/`recall`
-    before it, not wired into any edge, so it is an orphan in this topology
-    on purpose (LangGraph compiles unreachable nodes without error)."""
+    sitting in front of `refund`. Chapter 13 adds `recall` (START -> recall
+    -> triage) and `remember` (answer -> remember -> END). Chapter 17 adds
+    `research`, the mounted map-reduce subgraph - present as a node but not
+    wired into any edge, so it is an orphan in this topology on purpose
+    (LangGraph compiles unreachable nodes without error)."""
     node_names = {
         name for name in graph.get_graph().nodes if not name.startswith("__")
     }
@@ -346,6 +493,8 @@ def test_graph_compiles_with_the_chapter_3_branching_topology():
         "approval_gate",
         "refund",
         "research",
+        "recall",
+        "remember",
     }
 
 
@@ -1150,7 +1299,7 @@ def test_research_node_survives_an_unreachable_source_without_crashing():
 
 
 def test_research_is_registered_as_a_node_but_not_wired_into_any_edge():
-    """Like remember/recall before it: the chapter's own code adds the node
+    """The chapter's own code adds the node
     (`builder.add_node("research", research)`) but names no place in the
     routing topology to reach it from."""
     assert "research" in graph.nodes
