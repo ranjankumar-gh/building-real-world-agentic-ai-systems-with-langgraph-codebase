@@ -12,7 +12,20 @@ attached to the run it graded - a live signal, not a merge-time one.
 bounded - judging every production run with another model call doubles the
 LLM spend on every request. `sample_rate` is a knob to tune against
 Chapter 23's cost controls, not a constant to leave at whatever felt
-reasonable during development."""
+reasonable during development.
+
+`is_root=True`: Chapter 20's `trace_config` tags are inherited by every span
+under the root, so `has(tags, "atlas")` alone also returns the model, tool,
+and node spans, and the judge would grade a tool call as if it were an
+answer. `start_time` is a window as long as the schedule that runs the
+monitor (Chapter 22's cron fires every 15 minutes), so each run scores only
+traffic the previous run did not see, instead of re-reading the newest runs
+and writing a second feedback row on runs it already scored. A window,
+rather than a `since` the caller passes, keeps the monitor stateless:
+Chapter 22's cron starts every run on a fresh thread with only
+`sample_rate` as input."""
+
+from datetime import datetime, timedelta, timezone
 
 from langsmith import Client
 
@@ -21,12 +34,15 @@ from atlas.evals import answer_quality
 client = Client()  # no API key needed to build; its background thread fetches /info
 
 
-def run_quality_monitor(sample_rate: float = 0.05) -> None:
+def run_quality_monitor(
+    sample_rate: float = 0.05, window: timedelta = timedelta(minutes=15)
+) -> None:
     """Score a sampled slice of tagged production traces (Chapter 20)."""
     runs = client.list_runs(
         project_name="atlas-prod",
         filter='has(tags, "atlas")',
-        limit=200,
+        is_root=True,
+        start_time=datetime.now(timezone.utc) - window,
     )
     for run in runs:
         if hash(run.id) % 100 >= sample_rate * 100:

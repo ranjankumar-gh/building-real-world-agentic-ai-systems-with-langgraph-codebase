@@ -11,6 +11,7 @@ test itself, matching the style already used for `atlas/tracing.py`'s
 `client.create_feedback` against a live LangSmith project needs a live
 connection; nothing in this file does that."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from atlas import monitor as monitor_module
@@ -98,4 +99,23 @@ def test_run_quality_monitor_queries_the_tagged_atlas_prod_traces(monkeypatch):
 
     assert seen_kwargs["project_name"] == "atlas-prod"
     assert seen_kwargs["filter"] == 'has(tags, "atlas")'
-    assert seen_kwargs["limit"] == 200
+
+
+def test_run_quality_monitor_reads_only_root_runs_inside_its_window(monkeypatch):
+    """Chapter 20's tags are inherited by every span, so without is_root=True
+    the judge would grade tool and model spans as answers; the start_time
+    window keeps each scheduled run from re-scoring runs it already scored."""
+    seen_kwargs = {}
+    monkeypatch.setattr(
+        monitor_module.Client, "list_runs",
+        lambda self, **kw: seen_kwargs.update(kw) or [],
+    )
+    before = datetime.now(timezone.utc)
+
+    run_quality_monitor(window=timedelta(minutes=15))
+
+    after = datetime.now(timezone.utc)
+    assert seen_kwargs["is_root"] is True
+    start = seen_kwargs["start_time"]
+    assert before - timedelta(minutes=15) <= start <= after - timedelta(minutes=15)
+    assert "limit" not in seen_kwargs  # the window bounds the read, not a count

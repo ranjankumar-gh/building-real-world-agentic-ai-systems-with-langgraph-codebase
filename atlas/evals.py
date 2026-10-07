@@ -160,12 +160,7 @@ def handoffs_within_bound(
     inputs: dict, outputs: dict, reference_outputs: dict
 ) -> bool:
     """Ch16: did the run take no more handoffs than this example needs? A
-    no-op on support-graph examples, which have no `max_handoffs` reference.
-
-    This is the ONLY evaluator in the suite that would have caught the
-    opening hook's regression - the final answer and even the final
-    specialist were both correct; only the hop count was wrong.
-    """
+    no-op on support-graph examples, which have no `max_handoffs` reference."""
     if "max_handoffs" not in reference_outputs:
         return True
     return outputs.get("handoffs", 0) <= reference_outputs["max_handoffs"]
@@ -300,7 +295,7 @@ ALL_EVALUATORS = [
 ]
 
 
-def run_regression_suite(dataset_name: str = REGRESSION_DATASET):
+def run_regression_suite(dataset_name: str = REGRESSION_DATASET) -> Iterable[dict]:
     """Run the suite against the FROZEN dataset - distinct from an evolving
     dev-iteration dataset. See "Wiring the suite into CI"."""
     return evaluate(
