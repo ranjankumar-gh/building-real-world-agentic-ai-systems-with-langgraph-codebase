@@ -552,6 +552,13 @@ def test_gate_fails_on_any_false_score():
     assert gate([_row("a", True, True), _row("b", True, False)]) == 1
 
 
+def test_gate_fails_on_a_numeric_zero_score():
+    """A numeric evaluator scores a failure 0 (or 0.0), not False."""
+    assert gate([_row("a", True, 0)]) == 1
+    assert gate([_row("b", 0.0)]) == 1
+    assert gate([_row("c", None, 0.5)]) == 0
+
+
 def test_gate_fails_on_a_run_that_raised():
     """A run that raised hands its evaluators empty outputs, which a no-op
     evaluator would pass: the KeyError that hid the research bug."""

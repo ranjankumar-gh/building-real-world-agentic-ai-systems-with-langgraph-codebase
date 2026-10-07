@@ -71,8 +71,14 @@ def graph_store(runtime: Runtime | None, fallback: BaseStore | None) -> BaseStor
 
 ROLE_TOOL_PERMISSIONS: dict[str, set[str]] = {
     "support_agent": {"search_kb", "lookup_ticket", "set_ticket_status"},
+    "support_lead": {"search_kb", "lookup_ticket", "set_ticket_status"},
     "support_readonly": {"search_kb", "lookup_ticket"},  # <1>
 }
+
+# Who may approve a refund at Chapter 11's gate. On the served path the
+# gate reads the role off the authenticated identity (atlas/graph.py's
+# `audited_approval_gate`), never off the resume payload.
+APPROVER_ROLES: frozenset[str] = frozenset({"support_lead"})
 
 
 class RoleAuthorityGate(AgentMiddleware):
@@ -126,15 +132,30 @@ INJECTION_PATTERNS = re.compile(
 )
 
 
+_BINARY = ("data", "base64")  # encoded payloads: nothing a regex can read
+
+
 def _text_of(content: Content) -> str:
-    """The text a string or a list of content blocks carries."""
+    """Every string a string or a list of content blocks carries, for the scan.
+
+    Text blocks give their text. A non-text block (an image, a file, an
+    embedded resource) gives every string field except its encoded payload,
+    so a resource's text, a file name, or a URL is scanned too. Tagging
+    wraps text blocks only; an image cannot be wrapped in a tag, so a
+    non-text block passes through untagged once its strings scan clean."""
     if isinstance(content, str):
         return content
-    return "\n".join(
-        b if isinstance(b, str) else b.get("text", "")
-        for b in content
-        if isinstance(b, str) or b.get("type") == "text"
-    )
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        else:
+            parts.extend(
+                value
+                for key, value in block.items()
+                if isinstance(value, str) and key not in (*_BINARY, "type")
+            )
+    return "\n".join(parts)
 
 
 def tag_untrusted(content: Content, source: str) -> Content:

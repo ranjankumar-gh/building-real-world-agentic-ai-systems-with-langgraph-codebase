@@ -156,48 +156,171 @@ def test_audit_gate_records_a_command_result_without_failing():
     assert store.get(audit_ns("C-1"), "call-1").value["result_status"] == "command"
 
 
-def test_record_approval_keys_by_thread_and_ticket_so_a_replay_overwrites():
+def test_record_approval_is_append_only():
+    """A replay of the same decision adds nothing; a different decision at
+    the same checkpoint (a fork) appends; no row is ever overwritten."""
     store = InMemoryStore()
     ticket = {"id": "T-9", "customer_id": "C-1"}
-    first = {"decision": "approve", "by": "lead-3", "at": "t0"}
-    record_approval(store, ticket, "t-1", first)
-    record_approval(store, ticket, "t-1", {**first, "at": "t1"})
+    first = {"decision": "approve", "by": "lead-3", "at": "t0", "amount": 49.0}
 
-    rows = store.search(audit_ns("C-1"))
-    assert [r.key for r in rows] == ["approval:t-1:T-9"]
-    assert rows[0].value == {
-        "decision": "approve",
-        "by": "lead-3",
-        "at": "t1",
+    k1 = record_approval(store, ticket, "t-1", "cp-1", first)
+    k1_again = record_approval(store, ticket, "t-1", "cp-1", {**first, "at": "t1"})
+    fork = {"decision": "reject", "by": "lead-3", "at": "t2", "amount": None}
+    k2 = record_approval(store, ticket, "t-1", "cp-1", fork)
+
+    assert k1 == k1_again == "approval:t-1:cp-1"
+    assert k2 == "approval:t-1:cp-1:2"
+    assert store.get(audit_ns("C-1"), k1).value == {
+        **first,
         "event": "approval",
         "ticket": "T-9",
         "thread": "t-1",
     }
+    assert store.get(audit_ns("C-1"), k2).value["decision"] == "reject"
 
 
-def test_the_approval_gate_writes_its_decision_to_the_audit_namespace(monkeypatch):
-    """End to end through the compiled graph: suspend at the gate, resume
-    with an approval, and find the decision in the audit namespace of the
-    graph's own store - after the human acted, never before."""
+def _approval_rows(customer_id: str) -> list:
+    rows = graph.store.search(audit_ns(customer_id), limit=100)
+    return [r for r in rows if r.value.get("event") == "approval"]
+
+
+def _refund_thread(monkeypatch, thread_id: str, customer_id: str, **conf) -> dict:
     monkeypatch.setattr(
         graph_module, "classify", lambda messages: SimpleNamespace(route="refund")
     )
-    config = {"configurable": {"thread_id": "audit-approval-1"}}
+    config = {"configurable": {"thread_id": thread_id, **conf}}
     graph.invoke(
         {
             "messages": [{"role": "user", "content": "refund please"}],
-            "ticket": {"id": "T-1001", "amount": 49.0, "customer_id": "C-77"},
+            "ticket": {"id": "T-1001", "amount": 49.0, "customer_id": customer_id},
         },
         config,
     )
-    key = "approval:audit-approval-1:T-1001"
-    assert graph.store.get(audit_ns("C-77"), key) is None
+    return config
+
+
+def test_the_approval_gate_writes_its_decision_to_the_audit_namespace(monkeypatch):
+    """End to end through the compiled graph, in process: suspend at the
+    gate, resume with an approval, and find the decision - with the payload's
+    `by` and the amount charged - in the graph's own store, after the human
+    acted, never before."""
+    config = _refund_thread(monkeypatch, "audit-approval-1", "C-77")
+    assert _approval_rows("C-77") == []
 
     graph.invoke(Command(resume={"type": "approve", "by": "lead@support"}), config)
 
-    row = graph.store.get(audit_ns("C-77"), key)
+    [row] = _approval_rows("C-77")
+    assert row.key.startswith("approval:audit-approval-1:")
     assert row.value["decision"] == "approve"
     assert row.value["by"] == "lead@support"
+    assert row.value["amount"] == 49.0
     assert row.value["ticket"] == "T-1001"
     assert row.value["thread"] == "audit-approval-1"
     assert "at" in row.value
+
+
+def test_an_edited_approval_records_the_amount_actually_charged(monkeypatch):
+    config = _refund_thread(monkeypatch, "audit-approval-edit", "C-78")
+
+    graph.invoke(
+        Command(resume={"type": "edit", "amount": 20.0, "by": "lead@support"}), config
+    )
+
+    [row] = _approval_rows("C-78")
+    assert row.value["decision"] == "edit"
+    assert row.value["amount"] == 20.0
+
+
+def test_a_fork_from_the_paused_checkpoint_appends_never_overwrites(monkeypatch):
+    """Time travel (Chapter 9): fork the thread from the paused checkpoint
+    and decide differently there. The first row is untouched; the fork,
+    running from a new checkpoint, adds its own."""
+    config = _refund_thread(monkeypatch, "audit-approval-fork", "C-79")
+    paused = graph.get_state(config).config
+
+    graph.invoke(Command(resume={"type": "approve", "by": "lead@support"}), config)
+    fork = graph.update_state(paused, {"error": None}, as_node="triage")
+    graph.invoke(None, fork)  # pauses again at the gate, on the fork
+    graph.invoke(Command(resume={"type": "reject", "by": "lead@support"}), fork)
+
+    rows = sorted(_approval_rows("C-79"), key=lambda r: r.key)
+    assert [r.value["decision"] for r in rows] == ["approve", "reject"]
+    assert rows[0].value["amount"] == 49.0 and rows[1].value["amount"] is None
+
+
+# --- R94: on the served path the approver is the authenticated identity ----
+
+
+class _User:
+    def __init__(self, identity: str, role: str) -> None:
+        self.identity = identity
+        self.permissions = [f"role:{role}"]
+
+
+def _charges(monkeypatch) -> list:
+    charged: list = []
+    monkeypatch.setattr(
+        graph_module,
+        "charge_refund",
+        lambda key, ticket_id, amount: charged.append(amount) or "Refund issued.",
+    )
+    return charged
+
+
+def test_a_forged_by_from_a_non_approver_is_refused_and_nothing_is_charged(
+    monkeypatch,
+):
+    """A thread owner without the approver role resumes with
+    {"by": "ceo@corp"}. The gate reads the identity the server proved, not
+    the payload, refuses, escalates, and records who actually tried."""
+    charged = _charges(monkeypatch)
+    agent = _User("agent-7", "support_agent")
+    config = _refund_thread(
+        monkeypatch, "served-forged", "C-80", langgraph_auth_user=agent
+    )
+
+    out = graph.invoke(
+        Command(resume={"type": "approve", "by": "ceo@corp"}), config
+    )
+
+    assert charged == []
+    assert out.get("refund_done") is not True
+    assert out["ticket"] == {"status": "escalated"}
+    [row] = _approval_rows("C-80")
+    assert row.value["by"] == "agent-7"
+    assert row.value["amount"] is None
+    assert "may not approve" in row.value["refused"]
+
+
+def test_an_anonymous_resume_on_the_served_path_is_refused(monkeypatch):
+    charged = _charges(monkeypatch)
+    config = _refund_thread(
+        monkeypatch, "served-anon", "C-81", assistant_id="resolve"
+    )
+
+    graph.invoke(Command(resume={"type": "approve", "by": "lead-3"}), config)
+
+    assert charged == []
+    [row] = _approval_rows("C-81")
+    assert row.value["by"] is None
+    assert row.value["refused"] == "approval refused: no authenticated approver"
+
+
+def test_an_authenticated_approver_is_recorded_whatever_the_payload_says(
+    monkeypatch,
+):
+    charged = _charges(monkeypatch)
+    lead = _User("lead-3", "support_lead")
+    config = _refund_thread(
+        monkeypatch, "served-lead", "C-82", langgraph_auth_user=lead
+    )
+
+    out = graph.invoke(
+        Command(resume={"type": "approve", "by": "ceo@corp"}), config
+    )
+
+    assert charged == [49.0]
+    assert out["refund_done"] is True
+    [row] = _approval_rows("C-82")
+    assert row.value["by"] == "lead-3"
+    assert "refused" not in row.value

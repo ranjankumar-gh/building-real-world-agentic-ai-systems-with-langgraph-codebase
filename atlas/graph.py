@@ -166,10 +166,13 @@ compiles `_make_builder`'s wiring with neither. Every other caller,
 
 Chapter 23, "A durable audit log, deliberately separate from the trace",
 mounts `audited_approval_gate` in the "approval_gate" position: Chapter 11's
-`approval_gate`, unchanged, plus one store write after it returns - the
-approval record copied into the audit namespace (`atlas/audit.py`'s
-`record_approval`), where an erasure keeps it, rather than only into state,
-which an erasure deletes."""
+`approval_gate`, unchanged, plus two things after it returns. On the served
+path (`runtime.server_info` set) the approver is the authenticated identity,
+never the resume payload's `by`, and a refund goes on only if that identity
+holds an approver role. And every decision is appended to the audit
+namespace (`atlas/audit.py`'s `record_approval`), with the amount charged,
+where an erasure keeps it, rather than only into state, which an erasure
+deletes."""
 
 import asyncio
 from collections.abc import Callable
@@ -186,12 +189,14 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command, Overwrite, RetryPolicy, TimeoutPolicy, interrupt
 
 from atlas.audit import record_approval
+from atlas.auth import role_of
 from atlas.context import BUDGET, select_docs, trim_history
 from atlas.effects import RefundError, charge_refund, idempotency_key
 from atlas.helpers import compose_answer, search_kb
 from atlas.memory import profile_ns, relevant_memories
 from atlas.naive import ChatModel
 from atlas.research import research_graph
+from atlas.security import APPROVER_ROLES
 from atlas.state import AtlasState
 from atlas.tools import KnowledgeBaseUnavailable, text_of
 from atlas.triage import classify
@@ -385,24 +390,64 @@ def approval_gate(state: AtlasState) -> Command[Literal["refund", "escalate"]]:
     raise ValueError(f"unknown decision: {decision['type']}")
 
 
+def served_approver(runtime: Runtime) -> tuple[str | None, str | None]:
+    """(who approved, why refused) for a run the Agent Server is executing.
+
+    The approver is the identity `@auth.authenticate` proved
+    (`runtime.server_info.user`), never the `by` a resume payload carries,
+    and only an identity holding an approver role may send a refund on."""
+    user = runtime.server_info.user if runtime.server_info else None
+    identity = getattr(user, "identity", None)
+    if identity is None:
+        return None, "approval refused: no authenticated approver"
+    if role_of(user) not in APPROVER_ROLES:
+        return identity, f"approval refused: {identity} may not approve refunds"
+    return identity, None
+
+
 def audited_approval_gate(
     state: AtlasState, config: RunnableConfig, runtime: Runtime
 ) -> Command[Literal["refund", "escalate"]]:
-    """Chapter 23: Chapter 11's gate, plus its decision in the audit log."""
+    """Chapter 23: Chapter 11's gate, with the approver checked on the
+    served path and every decision appended to the audit log."""
     command = approval_gate(state)  # raises GraphInterrupt until a human decides
-    if runtime.store is not None:  # <1>
-        thread_id = config["configurable"]["thread_id"]
+    approval = command.update["approval"]
+    if runtime.server_info is not None:  # <1>
+        identity, refusal = served_approver(runtime)
+        approval = {**approval, "by": identity}
+        if refusal is not None and command.goto == "refund":
+            approval = {**approval, "refused": refusal}
+            command = Command(
+                update={"approval": approval, "error": refusal}, goto="escalate"
+            )
+        else:
+            command = Command(
+                update={**command.update, "approval": approval}, goto=command.goto
+            )
+    if runtime.store is not None:  # <2>
+        ticket = command.update.get("ticket", state["ticket"])
+        amount = ticket["amount"] if command.goto == "refund" else None
         record_approval(
-            runtime.store, state["ticket"], thread_id, command.update["approval"]
+            runtime.store,
+            ticket,
+            config["configurable"]["thread_id"],
+            runtime.execution_info.checkpoint_id,
+            {**approval, "amount": amount},
         )
     return command
 
 
-# 1. Reached only once `interrupt()` has returned a decision, so the write
-#    happens on the resumed run, after the human acted, never before. The key
-#    is the thread plus the ticket, so a replayed decision overwrites its own
-#    record instead of adding a second one. A graph compiled with no store has
-#    nowhere durable to put it; under the Agent Server there always is one.
+# 1. `runtime.server_info` is set when the Agent Server runs the graph. There,
+#    the approver is the authenticated user, and a resume from anyone else -
+#    a thread owner typing {"by": "ceo@corp"}, or an anonymous caller - is
+#    refused and escalated: nothing is charged. In process, Atlas's own code
+#    resumes the run and the payload's `by` stands (Chapter 11).
+# 2. Reached only once `interrupt()` has returned a decision, so the write
+#    happens on the resumed run, after the human acted, never before. The row
+#    is keyed by the checkpoint the decision was made at and never
+#    overwritten: a replay of the same decision finds it already there, and
+#    a fork that decides differently appends its own row. `amount` is what
+#    goes on to `refund` (after an edit), or None.
 
 
 def refund(state: AtlasState, config: RunnableConfig) -> dict:

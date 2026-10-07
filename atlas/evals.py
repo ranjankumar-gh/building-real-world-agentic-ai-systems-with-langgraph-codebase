@@ -313,12 +313,12 @@ def run_regression_suite(dataset_name: str = REGRESSION_DATASET):
 
 def gate(results: Iterable[dict]) -> int:
     """The merge gate: exit status 1 if any run raised or any evaluator
-    scored any example False. `evaluate()` only records scores."""
+    scored any example False or 0. `evaluate()` only records scores."""
     failed = [
         row["example"].id
         for row in results
         if row["run"].error
-        or any(r.score is False for r in row["evaluation_results"]["results"])
+        or any(r.score in (False, 0) for r in row["evaluation_results"]["results"])
     ]
     for example_id in failed:
         print(f"regression: example {example_id} failed", file=sys.stderr)

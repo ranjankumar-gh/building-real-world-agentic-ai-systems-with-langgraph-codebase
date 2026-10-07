@@ -16,7 +16,9 @@ Two writers share one namespace, `audit_ns(customer_id)`:
 - `AuditGate` records every tool call the resolve agent makes, refused or
   not: tool, args, role, result status, time.
 - `record_approval` records every Chapter 11 approval decision: decision,
-  approver, time, ticket, thread. The refund is a graph node, not a tool,
+  approver, time, ticket, thread, and the amount sent on to `refund`
+  (after an edit), append-only, one row per checkpoint the decision was
+  made at. The refund is a graph node, not a tool,
   so `AuditGate` never sees it; and Chapter 11's `approval` record lives in
   graph state, which is a checkpoint, and checkpoints are the first thing
   an erasure deletes (`atlas/erasure.py`). So `atlas/graph.py`'s
@@ -91,13 +93,32 @@ class AuditGate(AgentMiddleware):
         return response
 
 
+_SAME = ("decision", "by", "amount", "refused")
+
+
 def record_approval(
-    store: BaseStore, ticket: dict[str, Any], thread_id: str, record: dict[str, Any]
-) -> None:
-    """Copy a Chapter 11 approval decision into the audit namespace."""
-    customer_id = ticket.get("customer_id") or "unknown"
-    store.put(
-        audit_ns(customer_id),
-        f"approval:{thread_id}:{ticket['id']}",  # a replay overwrites, never doubles
-        {**record, "event": "approval", "ticket": ticket["id"], "thread": thread_id},
-    )
+    store: BaseStore,
+    ticket: dict[str, Any],
+    thread_id: str,
+    checkpoint_id: str,
+    record: dict[str, Any],
+) -> str:
+    """Append a Chapter 11 approval decision to the audit namespace.
+
+    Append-only. The key names the checkpoint the decision was made at; a
+    replay of the same decision finds its row and adds nothing, and a
+    different decision at the same checkpoint (a fork resumed from it) gets
+    the next free suffix. No row is ever overwritten. Returns the key."""
+    ns = audit_ns(ticket.get("customer_id") or "unknown")
+    base = f"approval:{thread_id}:{checkpoint_id}"
+    row = {**record, "event": "approval", "ticket": ticket["id"], "thread": thread_id}
+    n = 1
+    while True:
+        key = base if n == 1 else f"{base}:{n}"
+        existing = store.get(ns, key)
+        if existing is None:
+            store.put(ns, key, row)
+            return key
+        if all(existing.value.get(f) == row.get(f) for f in _SAME):
+            return key  # this decision is already on record
+        n += 1

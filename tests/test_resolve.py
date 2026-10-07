@@ -389,3 +389,68 @@ def test_an_ainvoke_through_the_resolved_graph_passes_every_gate(
     audit = graph.store.get(("audit", "C-5"), "c-1")
     assert audit.value["role"] == "support_agent"
     assert graph.store.search(("customer", "C-5", "budget"))
+
+
+def test_the_async_mount_runs_a_tool_and_resumes_the_nested_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`make_aresolve_node` end to end under ainvoke: the mounted agent looks
+    the ticket up, proposes resolving it, pauses for approval inside the
+    agent (Chapter 8's RecordingApproval), and the outer graph's resume
+    carries the decision into the nested agent, which finishes."""
+    import copy
+
+    import atlas.agent as agent_module
+    import atlas.tools as tools_module
+    from langgraph.types import Command
+
+    monkeypatch.setattr(tools_module, "_TICKETS", copy.deepcopy(tools_module._TICKETS))
+    lookup = {"name": "lookup_ticket", "args": {"ticket_id": "T-1001"}, "id": "c-1"}
+    resolve_call = {
+        "name": "set_ticket_status",
+        "args": {"ticket_id": "T-1001", "status": "resolved"},
+        "id": "c-2",
+    }
+    model = _ToolCallingFake(
+        messages=iter(
+            [
+                AIMessage("", tool_calls=[lookup]),
+                AIMessage("", tool_calls=[resolve_call]),
+                AIMessage("Ticket T-1001 is resolved."),
+            ]
+        )
+    )
+    monkeypatch.setattr(agent_module, "model", model)
+    graph = build_graph(
+        model=ScriptedModel([AIMessage("answer")]),
+        resolve_node=resolve_module.make_aresolve_node(
+            resolve_module.mount_resolve_agent()
+        ),
+    )
+    config = {"configurable": {"thread_id": "async-mount-hitl"}}
+    context = AtlasContext(role="support_agent", customer_id="C-6")
+
+    paused = asyncio.run(
+        graph.ainvoke(
+            {"messages": [{"role": "user", "content": "close T-1001"}]},
+            config,
+            context=context,
+        )
+    )
+    assert paused["__interrupt__"][0].value["action_requests"][0]["name"] == (
+        "set_ticket_status"
+    )
+    assert tools_module._TICKETS["T-1001"]["status"] != "resolved"
+
+    done = asyncio.run(
+        graph.ainvoke(
+            Command(resume={"decisions": [{"type": "approve"}]}),
+            config,
+            context=context,
+        )
+    )
+
+    assert done["messages"][-1].content == "Ticket T-1001 is resolved."
+    assert tools_module._TICKETS["T-1001"]["status"] == "resolved"
+    audited = {r.key for r in graph.store.search(("audit", "C-6"))}
+    assert audited == {"c-1", "c-2"}

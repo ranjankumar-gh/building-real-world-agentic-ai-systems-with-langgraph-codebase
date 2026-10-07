@@ -49,6 +49,7 @@ auth = Auth()
 # atlas/security.py is what a role then means in terms of tools.
 DEV_IDENTITIES: dict[str, dict[str, str]] = {
     "dev-agent-token": {"identity": "agent-7", "role": "support_agent"},
+    "dev-lead-token": {"identity": "lead-3", "role": "support_lead"},
     "dev-readonly-token": {"identity": "auditor-2", "role": "support_readonly"},
 }
 

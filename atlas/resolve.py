@@ -151,6 +151,23 @@ def make_resolve_node(agent: CompiledStateGraph) -> Callable[[AtlasState], dict]
     return resolve
 
 
+def make_aresolve_node(
+    agent: CompiledStateGraph,
+) -> Callable[[AtlasState], Awaitable[dict]]:
+    """The async twin of `make_resolve_node`: the same adapter, awaiting
+    `agent.ainvoke`, so the mounted agent's middleware run their async hooks
+    and a nested pause resumes on an async checkpointer."""
+
+    async def resolve(state: AtlasState) -> dict:
+        sent = {m.id for m in state["messages"]}
+        out = await agent.ainvoke(
+            {"messages": state["messages"], "reference": reference_text(state)}
+        )
+        return {"messages": _agent_turn(out["messages"], sent)}
+
+    return resolve
+
+
 def mount_resolve_agent() -> CompiledStateGraph:
     """`resolve_agent`'s configuration plus one layer, `ReferenceContext`."""
     # Imported here, not at module level: importing atlas.agent loads the

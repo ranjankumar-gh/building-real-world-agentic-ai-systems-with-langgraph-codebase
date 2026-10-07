@@ -235,7 +235,7 @@ def test_retained_audit_lists_every_row_past_a_page_edge(monkeypatch):
 def _with_approval() -> InMemoryStore:
     store = _seeded()
     record = {"decision": "approve", "by": "lead-3", "at": "2026-10-07T10:00:00+00:00"}
-    record_approval(store, {"id": "T-1", "customer_id": "C-1"}, "t-1", record)
+    record_approval(store, {"id": "T-1", "customer_id": "C-1"}, "t-1", "cp-1", record)
     return store
 
 
@@ -248,9 +248,9 @@ def test_an_approval_record_is_kept_under_retain_audit():
         store, "C-1", thread_ids=["t-1"], checkpointer=InMemorySaver()
     )
 
-    kept = store.get(audit_ns("C-1"), "approval:t-1:T-1")
+    kept = store.get(audit_ns("C-1"), "approval:t-1:cp-1")
     assert kept.value["decision"] == "approve" and kept.value["by"] == "lead-3"
-    assert (audit_ns("C-1"), "approval:t-1:T-1") in report.retained
+    assert (audit_ns("C-1"), "approval:t-1:cp-1") in report.retained
     assert report.complete is False
 
 
@@ -259,7 +259,7 @@ def test_an_approval_record_is_deleted_when_retain_audit_is_false():
 
     report = erase_customer(store, "C-1", thread_ids=[], retain_audit=False)
 
-    assert store.get(audit_ns("C-1"), "approval:t-1:T-1") is None
+    assert store.get(audit_ns("C-1"), "approval:t-1:cp-1") is None
     assert report.retained == []
     assert report.complete is True
 

@@ -8,6 +8,8 @@ the `AtlasContext` from the identity the server proved, never from the
 caller's `context`; and the `monitor` graph runs Chapter 21's monitor with
 the input the cron sends."""
 
+import asyncio
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,7 +26,7 @@ class _RecordingAgent:
     def __init__(self) -> None:
         self.contexts: list[Any] = []
 
-    def invoke(self, payload: dict, context: Any = None) -> dict:
+    async def ainvoke(self, payload: dict, context: Any = None) -> dict:
         self.contexts.append(context)
         return {"messages": [*payload["messages"], AIMessage("resolved")]}
 
@@ -70,13 +72,15 @@ def test_the_served_node_reads_the_role_off_the_proved_identity(monkeypatch):
     graph, agent = _served(monkeypatch)
     user = _User("agent-7", ["role:support_agent"])
 
-    graph.invoke(
-        {
-            "messages": [{"role": "user", "content": "hi"}],
-            "ticket": {"id": "T-1", "amount": 10.0, "customer_id": "C-9"},
-        },
-        {"configurable": {"langgraph_auth_user": user}},
-        context=AtlasContext(role="forged-admin", customer_id="C-other"),
+    asyncio.run(
+        graph.ainvoke(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "ticket": {"id": "T-1", "amount": 10.0, "customer_id": "C-9"},
+            },
+            {"configurable": {"langgraph_auth_user": user}},
+            context=AtlasContext(role="forged-admin", customer_id="C-other"),
+        )
     )
 
     assert agent.contexts == [AtlasContext(role="support_agent", customer_id="C-9")]
@@ -85,9 +89,11 @@ def test_the_served_node_reads_the_role_off_the_proved_identity(monkeypatch):
 def test_with_no_proved_identity_the_served_node_runs_anonymous(monkeypatch):
     graph, agent = _served(monkeypatch)
 
-    graph.invoke(
-        {"messages": [{"role": "user", "content": "hi"}]},
-        context=AtlasContext(role="support_agent", customer_id="C-1"),
+    asyncio.run(
+        graph.ainvoke(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            context=AtlasContext(role="support_agent", customer_id="C-1"),
+        )
     )
 
     assert agent.contexts == [AtlasContext(role="anonymous", customer_id="unknown")]
@@ -102,3 +108,10 @@ def test_the_monitor_graph_runs_the_monitor_with_the_crons_input(monkeypatch):
     server.monitor.invoke({"sample_rate": 0.05})
 
     assert seen == [0.05]
+
+
+def test_the_served_resolve_node_is_async():
+    """The server runs graphs with `astream`; the mounted agent is awaited,
+    so its middleware run their async hooks on the server's loop."""
+    node = server.resolve.builder.nodes["answer"].runnable
+    assert inspect.iscoroutinefunction(node.afunc)
