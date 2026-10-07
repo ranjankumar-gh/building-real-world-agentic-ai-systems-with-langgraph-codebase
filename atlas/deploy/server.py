@@ -80,7 +80,7 @@ def amake_served_resolve_node(
 def build_served_graph(agent: CompiledStateGraph | None = None) -> Pregel:
     """Atlas's topology with the mounted agent, for the Agent Server."""
     node = amake_served_resolve_node(agent or mount_resolve_agent())
-    return _make_builder(triage, resolve_node=node).compile()  # <2>
+    return _make_builder(triage, resolve_node=node, served=True).compile()  # <2>
 
 
 class MonitorInput(TypedDict):
@@ -115,3 +115,6 @@ monitor = build_monitor_graph()
 #    server's store and a pause inside the agent resumes from the server's
 #    checkpointer. The node is the async twin: the server runs graphs with
 #    `astream`, so the agent runs its async hooks on the server's loop.
+#    `served=True` mounts the fail-closed approval gate and refund
+#    (atlas/graph.py): the approver is this run's authenticated identity,
+#    and with no identity nothing is approved and nothing is charged.

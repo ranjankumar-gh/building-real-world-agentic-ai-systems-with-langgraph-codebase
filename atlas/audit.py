@@ -17,8 +17,9 @@ Two writers share one namespace, `audit_ns(customer_id)`:
   not: tool, args, role, result status, time.
 - `record_approval` records every Chapter 11 approval decision: decision,
   approver, time, ticket, thread, and the amount sent on to `refund`
-  (after an edit), append-only, one row per checkpoint the decision was
-  made at. The refund is a graph node, not a tool,
+  (after an edit), or the refusal and who was refused - at the gate, or at
+  the refund node, which checks again before it charges. Append-only: every
+  write has its own key. The refund is a graph node, not a tool,
   so `AuditGate` never sees it; and Chapter 11's `approval` record lives in
   graph state, which is a checkpoint, and checkpoints are the first thing
   an erasure deletes (`atlas/erasure.py`). So `atlas/graph.py`'s
@@ -35,6 +36,7 @@ they were never the same record."""
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import ToolMessage
@@ -93,9 +95,6 @@ class AuditGate(AgentMiddleware):
         return response
 
 
-_SAME = ("decision", "by", "amount", "refused")
-
-
 def record_approval(
     store: BaseStore,
     ticket: dict[str, Any],
@@ -103,22 +102,23 @@ def record_approval(
     checkpoint_id: str,
     record: dict[str, Any],
 ) -> str:
-    """Append a Chapter 11 approval decision to the audit namespace.
+    """Append one approval event to the audit namespace. Returns its key.
 
-    Append-only. The key names the checkpoint the decision was made at; a
-    replay of the same decision finds its row and adds nothing, and a
-    different decision at the same checkpoint (a fork resumed from it) gets
-    the next free suffix. No row is ever overwritten. Returns the key."""
-    ns = audit_ns(ticket.get("customer_id") or "unknown")
-    base = f"approval:{thread_id}:{checkpoint_id}"
-    row = {**record, "event": "approval", "ticket": ticket["id"], "thread": thread_id}
-    n = 1
-    while True:
-        key = base if n == 1 else f"{base}:{n}"
-        existing = store.get(ns, key)
-        if existing is None:
-            store.put(ns, key, row)
-            return key
-        if all(existing.value.get(f) == row.get(f) for f in _SAME):
-            return key  # this decision is already on record
-        n += 1
+    Append-only by construction: every write gets a fresh key, the thread,
+    the checkpoint the decision was made at, and a random suffix, so no
+    write can land on another's row and nothing is read first. A gate or
+    refund node that runs again (a retry, a replay, a fork from an earlier
+    checkpoint) logs its own row; a reader sorts by `at` and reads them all.
+    """
+    key = f"approval:{thread_id}:{checkpoint_id}:{uuid4().hex}"
+    store.put(
+        audit_ns(ticket.get("customer_id") or "unknown"),
+        key,
+        {
+            **record,
+            "event": "approval",
+            "ticket": ticket.get("id"),
+            "thread": thread_id,
+        },
+    )
+    return key

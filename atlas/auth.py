@@ -40,7 +40,7 @@ from typing import Any
 
 from langgraph_sdk import Auth
 
-from atlas.security import AtlasContext
+from atlas.security import APPROVER_ROLES, AtlasContext
 
 auth = Auth()
 
@@ -113,11 +113,31 @@ async def deny_by_default(ctx: Auth.types.AuthContext, value: Any) -> bool:
     return False
 
 
+def _steers_the_graph(ctx: Auth.types.AuthContext, value: Any) -> bool:
+    """A run whose command carries `goto` or `update` moves the graph or
+    writes its state from outside: only an approver may send one."""
+    command = (value.get("kwargs") or {}).get("command") or {}
+    return bool(command.get("goto") or command.get("update")) and (
+        role_of(ctx.user) not in APPROVER_ROLES
+    )
+
+
 def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str]:
     """Stamp a new resource with its owner, then filter every access to it."""
+    if ctx.action == "create_run" and _steers_the_graph(ctx, value):  # <1>
+        raise Auth.exceptions.HTTPException(
+            status_code=403, detail="only an approver may send goto or update"
+        )
     if ctx.action in ("create", "create_run"):
         value.setdefault("metadata", {})["owner"] = ctx.user.identity
     return {"owner": ctx.user.identity}
+
+
+# 1. Defense in depth, not the control: `refund` refuses a non-approver on
+#    its own (atlas/graph.py). The in-memory runtime passes the run's
+#    request body to this hook as value["kwargs"] (langgraph-runtime-inmem
+#    0.34.2, checked by probe); a runtime that does not leaves `kwargs`
+#    empty, and the check inside the graph still holds.
 
 
 @auth.on.threads

@@ -216,3 +216,34 @@ def test_crons_are_allowed_for_their_owner_not_refused_by_default_deny() -> None
 
     assert result == {"owner": "agent-7"}
     assert value["metadata"]["owner"] == "agent-7"
+
+
+# --- R101: a run that steers the graph needs an approver ---------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [{"goto": "refund"}, {"update": {"ticket": {"amount": 9999}}, "goto": "refund"}],
+)
+def test_a_non_approver_may_not_create_a_run_with_goto_or_update(command) -> None:
+    ctx = _Ctx(_User("agent-7", ["role:support_agent"]), "create_run")
+    value: dict[str, Any] = {"kwargs": {"command": command}}
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        asyncio.run(threads_are_scoped_to_their_owner(ctx, value))
+
+    assert excinfo.value.status_code == 403
+
+
+def test_a_resume_only_command_and_a_lead_steering_are_allowed() -> None:
+    agent = _Ctx(_User("agent-7", ["role:support_agent"]), "create_run")
+    lead = _Ctx(_User("lead-3", ["role:support_lead"]), "create_run")
+    resume = {"kwargs": {"command": {"resume": {"type": "approve"}}}}
+    steer = {"kwargs": {"command": {"goto": "refund"}}}
+
+    assert asyncio.run(threads_are_scoped_to_their_owner(agent, resume)) == {
+        "owner": "agent-7"
+    }
+    assert asyncio.run(threads_are_scoped_to_their_owner(lead, steer)) == {
+        "owner": "lead-3"
+    }
