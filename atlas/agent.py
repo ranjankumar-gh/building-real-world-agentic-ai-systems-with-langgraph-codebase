@@ -274,15 +274,22 @@ def run_resolve(inputs: dict, config: dict) -> dict:
     the graph's own runs. `trace_config` stays the one place those names
     are set; this wrapper only reads the two ids off
     `config["configurable"]` (Chapter 9/13's identifiers) and merges the
-    result over the caller's config. There is no route tag: the route is
-    triage's output, decided inside the turn. Naming a run needs no live
+    caller's own naming in: its tags are added after trace_config's, its
+    metadata keys kept beside the two ids, and a `run_name` it sets wins.
+    There is no route tag: the route is triage's output, decided inside the
+    turn. Naming a run needs no live
     LangSmith connection; spans are sent only once `LANGSMITH_TRACING` is
     "true"."""
     configurable = config["configurable"]
     named = trace_config(
         "support", configurable["thread_id"], configurable["customer_id"]
     )
-    return resolve_agent.invoke(
-        inputs,
-        {**config, **named, "configurable": {**configurable, **named["configurable"]}},
-    )
+    extra = [t for t in config.get("tags", []) if t not in named["tags"]]
+    merged = {
+        **config,
+        "run_name": config.get("run_name") or named["run_name"],
+        "tags": [*named["tags"], *extra],
+        "metadata": {**config.get("metadata", {}), **named["metadata"]},
+        "configurable": {**configurable, **named["configurable"]},
+    }
+    return resolve_agent.invoke(inputs, merged)

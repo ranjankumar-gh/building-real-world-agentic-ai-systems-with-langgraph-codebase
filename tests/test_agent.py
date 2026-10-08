@@ -186,6 +186,38 @@ def test_run_resolve_names_the_run_the_way_trace_config_does(monkeypatch):
     assert sent["recursion_limit"] == 30
 
 
+def test_run_resolve_merges_the_callers_tags_metadata_and_run_name(monkeypatch):
+    """An eval harness's own tag and metadata survive; trace_config's come
+    first and its two ids win; a run_name the caller sets is kept."""
+    captured = {}
+
+    class _FakeAgent:
+        def invoke(self, inputs, config):
+            captured["config"] = config
+            return {}
+
+    monkeypatch.setattr(agent_module, "resolve_agent", _FakeAgent())
+
+    run_resolve(
+        {"messages": []},
+        {
+            "configurable": {"thread_id": "t-1", "customer_id": "cust-1"},
+            "tags": ["eval", "atlas"],
+            "metadata": {"dataset": "regression", "thread_id": "spoofed"},
+            "run_name": "eval-turn",
+        },
+    )
+
+    sent = captured["config"]
+    assert sent["tags"] == ["atlas", "support", "eval"]
+    assert sent["metadata"] == {
+        "dataset": "regression",
+        "thread_id": "t-1",
+        "customer_id": "cust-1",
+    }
+    assert sent["run_name"] == "eval-turn"
+
+
 def test_run_resolve_requires_thread_id_and_customer_id_in_configurable(
     monkeypatch,
 ):
