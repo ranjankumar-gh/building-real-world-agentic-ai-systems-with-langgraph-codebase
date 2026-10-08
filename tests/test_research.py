@@ -68,6 +68,7 @@ from atlas.research import (
     remember_finding,
     report,
     research_graph,
+    findings_key,
     research_ns,
     research_worker,
     route_from_specialist,
@@ -644,8 +645,8 @@ def test_research_graph_honors_max_concurrency_in_the_invoke_config():
 
 def test_research_ns_scopes_by_customer_id():
     """Same privacy-boundary shape as atlas/memory.py's profile_ns, pointed
-    at a "research" namespace instead of "profile"."""
-    assert research_ns("cust-1") == ("customer", "cust-1", "research-findings")
+    at a "findings-cache" namespace instead of "profile"."""
+    assert research_ns("cust-1") == ("customer", "cust-1", "findings-cache")
     assert research_ns("cust-1") != research_ns("cust-2")
 
 
@@ -653,6 +654,36 @@ def test_research_ns_does_not_share_the_deep_agent_namespace():
     """Chapter 18's deep agent writes files under ("customer", id,
     "research"); cached findings get their own label."""
     assert research_ns("cust-1") != ("customer", "cust-1", "research")
+
+
+def test_no_other_namespace_prefix_matches_the_findings_cache():
+    """PostgresStore searches a namespace prefix as `LIKE '<dot-joined>%'`,
+    so a label is only private if no other label under ("customer", id) is
+    a string prefix of it, or has it as one."""
+    from atlas.cost import budget_ns
+    from atlas.memory import profile_ns
+
+    def dotted(ns: tuple[str, ...]) -> str:
+        return ".".join(ns)
+
+    cache = dotted(research_ns("cust-1"))
+    others = [
+        profile_ns("cust-1"),
+        budget_ns("cust-1", "2026-10"),
+        ("customer", "cust-1", "research"),  # Chapter 18's deep agent
+        ("customer", "cust-1", "langmem"),  # LangMem, atlas/memory.py
+    ]
+    for other in map(dotted, others):
+        assert not cache.startswith(other) and not other.startswith(cache)
+    assert "_" not in research_ns("cust-1")[2]  # "_" is a LIKE wildcard
+
+
+def test_findings_key_is_the_query_and_the_sorted_sources():
+    one = findings_key("policies?", ["web/b", "docs/a"])
+
+    assert one == findings_key("policies?", ["docs/a", "web/b"])
+    assert one != findings_key("policies?", ["docs/a"])
+    assert one != findings_key("other?", ["docs/a", "web/b"])
 
 
 @pytest.mark.parametrize("bad", ["", "cust.1", "cust%", "cust_1", "a/b"])
@@ -664,10 +695,11 @@ def test_research_ns_refuses_an_id_that_could_widen_a_match(bad):
 def test_recall_finding_returns_none_on_a_genuine_miss():
     store = InMemoryStore()
 
-    assert recall_finding(store, "cust-1", "return policy?") is None
+    assert recall_finding(store, "cust-1", "return policy?", SOURCES) is None
 
 
 FOUND = [{"source": "docs.internal/refund-policy", "result": "30-day window."}]
+SOURCES = ["docs.internal/refund-policy"]
 
 
 def test_remember_finding_then_recall_finding_round_trips():
@@ -676,9 +708,9 @@ def test_remember_finding_then_recall_finding_round_trips():
     dicts, stored and returned as they are."""
     store = InMemoryStore()
 
-    assert remember_finding(store, "cust-1", "return policy?", FOUND) is True
+    assert remember_finding(store, "cust-1", "return policy?", SOURCES, FOUND) is True
 
-    assert recall_finding(store, "cust-1", "return policy?") == FOUND
+    assert recall_finding(store, "cust-1", "return policy?", SOURCES) == FOUND
 
 
 def test_remember_finding_never_caches_a_run_with_an_error_finding():
@@ -687,16 +719,26 @@ def test_remember_finding_never_caches_a_run_with_an_error_finding():
     store = InMemoryStore()
     findings = [*FOUND, {"source": "web/gone", "error": "source unreachable"}]
 
-    assert remember_finding(store, "cust-1", "return policy?", findings) is False
+    remembered = remember_finding(store, "cust-1", "return policy?", SOURCES, findings)
+    assert remembered is False
 
-    assert recall_finding(store, "cust-1", "return policy?") is None
+    assert recall_finding(store, "cust-1", "return policy?", SOURCES) is None
 
 
 def test_recall_finding_is_scoped_per_customer():
     store = InMemoryStore()
-    remember_finding(store, "cust-1", "return policy?", FOUND)
+    remember_finding(store, "cust-1", "return policy?", SOURCES, FOUND)
 
-    assert recall_finding(store, "cust-2", "return policy?") is None
+    assert recall_finding(store, "cust-2", "return policy?", SOURCES) is None
+
+
+def test_recall_finding_is_scoped_per_source_set():
+    """The same question asked of other sources is another answer: a hit
+    must never return findings the named sources did not produce."""
+    store = InMemoryStore()
+    remember_finding(store, "cust-1", "return policy?", SOURCES, FOUND)
+
+    assert recall_finding(store, "cust-1", "return policy?", ["web/other"]) is None
 
 
 def test_recall_finding_treats_a_stale_hit_as_a_miss():
@@ -706,11 +748,11 @@ def test_recall_finding_treats_a_stale_hit_as_a_miss():
     stale = datetime.now(timezone.utc) - timedelta(days=DEFAULT_TTL_DAYS + 1)
     store.put(
         research_ns("cust-1"),
-        "return policy?",
+        findings_key("return policy?", SOURCES),
         {"findings": FOUND, "recorded_at": stale.isoformat()},
     )
 
-    assert recall_finding(store, "cust-1", "return policy?") is None
+    assert recall_finding(store, "cust-1", "return policy?", SOURCES) is None
 
 
 # --- Why recall_finding does its own expiry check, rather than leaning on
@@ -774,11 +816,11 @@ def test_recall_finding_returns_a_hit_just_inside_the_ttl_window():
     fresh = datetime.now(timezone.utc) - timedelta(days=DEFAULT_TTL_DAYS - 1)
     store.put(
         research_ns("cust-1"),
-        "return policy?",
+        findings_key("return policy?", SOURCES),
         {"findings": FOUND, "recorded_at": fresh.isoformat()},
     )
 
-    assert recall_finding(store, "cust-1", "return policy?") == FOUND
+    assert recall_finding(store, "cust-1", "return policy?", SOURCES) == FOUND
 
 
 # --- Chapter 23: the report is screened before the coordinator reads it ----

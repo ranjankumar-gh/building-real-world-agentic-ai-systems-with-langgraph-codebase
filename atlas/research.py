@@ -101,11 +101,14 @@ memory horizon (Chapter 13's pattern) it had been missing:
 repointed at research findings instead of a customer profile. Findings are
 the map-reduce's dicts, and a run with an error finding is never cached, so
 a source that was down once is looked up again next time rather than
-served as unavailable for 30 days. The call site is `atlas/run.py`'s
-`run_research`: given a store, a customer and a query, it recalls before
-the fan-out and remembers after a fresh run.
+served as unavailable for 30 days. An entry is keyed by the query AND the
+sorted sources (`findings_key`), in its own "findings-cache" namespace.
+The call site is `atlas/run.py`'s `run_research`: given a store, a
+customer and a query, it recalls before the fan-out and remembers after a
+fresh run.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from operator import add
 from typing import Annotated, TypedDict
@@ -372,21 +375,31 @@ DEFAULT_TTL_DAYS = 30
 
 
 def research_ns(customer_id: str) -> tuple[str, ...]:
-    """Cached findings for one customer. Its own label, so it never shares
-    Chapter 18's deep-agent namespace ("customer", id, "research"), and the
-    same SAFE_ID check as `profile_ns`: an id that could widen a match is
-    refused."""
+    """Cached findings for one customer. The label "findings-cache" shares
+    no prefix with any other namespace under ("customer", id): PostgresStore
+    matches a search prefix as `LIKE '<dot-joined>%'`, so a label that began
+    "research" would turn up in a search of Chapter 18's deep-agent
+    namespace ("customer", id, "research"). Plus `profile_ns`'s SAFE_ID
+    check: an id that could widen a match is refused."""
     if not SAFE_ID.fullmatch(customer_id):
         raise ValueError(f"unsafe customer id: {customer_id!r}")
-    return ("customer", customer_id, "research-findings")
+    return ("customer", customer_id, "findings-cache")
+
+
+def findings_key(query: str, sources: list[str]) -> str:
+    """One cache entry per question asked of one set of sources: the same
+    query against other sources is a different answer. Sorted, so the
+    order a caller lists them in does not matter; JSON, so no query text
+    can forge another entry's key."""
+    return json.dumps([query, sorted(sources)])
 
 
 def recall_finding(
-    store: BaseStore, customer_id: str, query: str
+    store: BaseStore, customer_id: str, query: str, sources: list[str]
 ) -> list[dict] | None:
     """Chapter 13's recall, pointed at research findings instead of a
     profile. Returns None on a miss OR a stale hit - both mean re-derive."""
-    item = store.get(research_ns(customer_id), query)
+    item = store.get(research_ns(customer_id), findings_key(query, sources))
     if item is None:
         return None
     recorded_at = datetime.fromisoformat(item.value["recorded_at"])
@@ -396,7 +409,11 @@ def recall_finding(
 
 
 def remember_finding(
-    store: BaseStore, customer_id: str, query: str, findings: list[dict]
+    store: BaseStore,
+    customer_id: str,
+    query: str,
+    sources: list[str],
+    findings: list[dict],
 ) -> bool:
     """Cache a run's findings, unless any of them is an error: a source that
     was down once is retried next time, not served as down for 30 days."""
@@ -404,7 +421,7 @@ def remember_finding(
         return False
     store.put(
         research_ns(customer_id),
-        query,
+        findings_key(query, sources),
         {"findings": findings, "recorded_at": datetime.now(timezone.utc).isoformat()},
     )
     return True

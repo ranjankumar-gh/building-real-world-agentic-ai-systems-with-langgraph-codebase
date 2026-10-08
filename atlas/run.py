@@ -54,7 +54,8 @@ Chapter 24, "Patterns from Production", gives `run_research` the memory
 horizon the research extension was missing. Given a `store`, a
 `customer_id` and a `query`, it calls `atlas/research.py`'s
 `recall_finding` before the fan-out and returns the cached findings on a
-fresh hit, without starting a run; after a fresh run it calls
+fresh hit for the same query against the same sources, without starting a
+run; after a fresh run it calls
 `remember_finding`, which declines to cache a run with an error finding.
 Without all three, it runs exactly as Chapter 17 built it.
 """
@@ -204,13 +205,13 @@ def run_research(
     a store, a customer and a query, a fresh cached answer skips the run."""
     cached = store is not None and customer_id is not None and query is not None
     if cached:
-        findings = recall_finding(store, customer_id, query)
+        findings = recall_finding(store, customer_id, query, sources)
         if findings is not None:
             return {"sources": sources, "findings": findings}
     config = _research_config(thread_id, max_concurrency)
     result = research_runner.invoke({"sources": sources}, config)
     if cached:
-        remember_finding(store, customer_id, query, result["findings"])
+        remember_finding(store, customer_id, query, sources, result["findings"])
     return result
 
 

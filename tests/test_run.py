@@ -446,6 +446,25 @@ def test_cached_findings_are_scoped_to_the_customer(monkeypatch):
     assert calls == {"docs.internal/sla": 2}
 
 
+def test_the_same_query_against_other_sources_is_not_a_cache_hit(monkeypatch):
+    """A hit is keyed by the query and the sorted sources, so its findings
+    always come from the sources it names."""
+    from langgraph.store.memory import InMemoryStore
+
+    calls = _count_lookups(monkeypatch)
+    store = InMemoryStore()
+    ask = {"store": store, "customer_id": "cust-7", "query": "policies?"}
+
+    run_research(["docs.internal/sla"], thread_id="research-s1", **ask)
+    refund = ["docs.internal/refund-policy"]
+    other = run_research(refund, thread_id="research-s2", **ask)
+    again = run_research(refund, thread_id="research-s3", **ask)
+
+    assert calls == {"docs.internal/sla": 1, "docs.internal/refund-policy": 1}
+    assert {f["source"] for f in other["findings"]} == set(refund)
+    assert again == {"sources": refund, "findings": other["findings"]}
+
+
 def test_the_chapter_10_inputs_run_end_to_end_through_the_refund(monkeypatch):
     """Chapter 10's `inputs`, through the real compiled graph: the ticket
     arrives in the caller's input, triage routes "I need a refund." to the
