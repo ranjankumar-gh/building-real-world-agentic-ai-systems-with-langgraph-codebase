@@ -49,6 +49,14 @@ builder onto a checkpointer and `run_research` runs on a `thread_id`, so a
 failed superstep keeps the workers that finished and `resume_research`
 re-runs only the unfinished task. The module-level `research_graph` stays
 checkpointer-free for `langgraph.json` and its other importers.
+
+Chapter 24, "Patterns from Production", gives `run_research` the memory
+horizon the research extension was missing. Given a `store`, a
+`customer_id` and a `query`, it calls `atlas/research.py`'s
+`recall_finding` before the fan-out and returns the cached findings on a
+fresh hit, without starting a run; after a fresh run it calls
+`remember_finding`, which declines to cache a run with an error finding.
+Without all three, it runs exactly as Chapter 17 built it.
 """
 
 import logging
@@ -58,11 +66,12 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
+from langgraph.store.base import BaseStore
 from langgraph.types import Command, StateSnapshot
 
 from atlas.graph import graph
 from atlas.memory import reflect
-from atlas.research import research_builder
+from atlas.research import recall_finding, remember_finding, research_builder
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +188,30 @@ def _research_config(thread_id: str, max_concurrency: int) -> RunnableConfig:
     }
 
 
-def run_research(sources: list[str], thread_id: str, max_concurrency: int = 8) -> dict:
+def run_research(
+    sources: list[str],
+    thread_id: str,
+    max_concurrency: int = 8,
+    *,
+    store: BaseStore | None = None,
+    customer_id: str | None = None,
+    query: str | None = None,
+) -> dict:
     """Run the research fan-out on a fresh thread, at most `max_concurrency`
     workers at once; the rest queue and fill in as slots free. One
     thread_id per run: `findings` is an add channel, so a second run on
-    the same thread appends to the first run's findings."""
+    the same thread appends to the first run's findings. Chapter 24: with
+    a store, a customer and a query, a fresh cached answer skips the run."""
+    cached = store is not None and customer_id is not None and query is not None
+    if cached:
+        findings = recall_finding(store, customer_id, query)
+        if findings is not None:
+            return {"sources": sources, "findings": findings}
     config = _research_config(thread_id, max_concurrency)
-    return research_runner.invoke({"sources": sources}, config)
+    result = research_runner.invoke({"sources": sources}, config)
+    if cached:
+        remember_finding(store, customer_id, query, result["findings"])
+    return result
 
 
 def resume_research(thread_id: str, max_concurrency: int = 8) -> dict:

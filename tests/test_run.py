@@ -19,7 +19,11 @@ before reflection runs, and the next thread recalls what it extracted.
 Chapter 17, "Subgraphs, Parallelism, and Map-Reduce", adds `run_research` -
 "Bound the fan-out": `max_concurrency` is set on the invoke config, not the
 graph, so the same `research_graph` can be called with a different bound
-per call."""
+per call.
+
+Chapter 24, "Patterns from Production", wires the memory horizon into
+`run_research`: recall before the fan-out, remember after a fresh run, and
+never cache a run with an error finding."""
 
 import os
 
@@ -369,6 +373,77 @@ def test_a_crashed_worker_resumes_alone_and_the_finished_ones_are_kept(monkeypat
         "web/langgraph-overview": 1,
     }
     assert sorted(f["source"] for f in result["findings"]) == sorted(sources)
+
+
+# --- Chapter 24: the memory horizon, wired into run_research --------------
+
+
+def _count_lookups(monkeypatch) -> dict[str, int]:
+    from atlas import research as research_module
+
+    real = research_module.search_source
+    calls: dict[str, int] = {}
+
+    def counting(source: str) -> str:
+        calls[source] = calls.get(source, 0) + 1
+        return real(source)
+
+    monkeypatch.setattr(research_module, "search_source", counting)
+    return calls
+
+
+def test_a_repeat_request_is_answered_from_the_store_without_a_fan_out(monkeypatch):
+    """The chapter's opening, fixed: the June request costs a store read."""
+    from langgraph.store.memory import InMemoryStore
+
+    calls = _count_lookups(monkeypatch)
+    store = InMemoryStore()
+    sources = ["docs.internal/refund-policy", "docs.internal/sla"]
+    ask = {"store": store, "customer_id": "cust-7", "query": "return policies?"}
+
+    first = run_research(sources, thread_id="research-march", **ask)
+    second = run_research(sources, thread_id="research-june", **ask)
+
+    assert calls == {"docs.internal/refund-policy": 1, "docs.internal/sla": 1}
+    assert second["findings"] == first["findings"]
+
+
+def test_a_run_with_a_dead_source_is_not_cached(monkeypatch):
+    from langgraph.store.memory import InMemoryStore
+
+    calls = _count_lookups(monkeypatch)
+    store = InMemoryStore()
+    sources = ["docs.internal/refund-policy", "web/not-seeded"]
+    ask = {"store": store, "customer_id": "cust-7", "query": "return policies?"}
+
+    run_research(sources, thread_id="research-err-1", **ask)
+    second = run_research(sources, thread_id="research-err-2", **ask)
+
+    assert calls["web/not-seeded"] == 2  # looked up again, not served as down
+    assert any("error" in f for f in second["findings"])
+
+
+def test_run_research_without_a_store_runs_every_time(monkeypatch):
+    """No store, customer and query: exactly Chapter 17's behavior."""
+    calls = _count_lookups(monkeypatch)
+
+    run_research(["docs.internal/sla"], thread_id="research-plain-1", query="q")
+    run_research(["docs.internal/sla"], thread_id="research-plain-2", query="q")
+
+    assert calls == {"docs.internal/sla": 2}
+
+
+def test_cached_findings_are_scoped_to_the_customer(monkeypatch):
+    from langgraph.store.memory import InMemoryStore
+
+    calls = _count_lookups(monkeypatch)
+    store = InMemoryStore()
+    sources = ["docs.internal/sla"]
+
+    run_research(sources, "research-c1", store=store, customer_id="cust-1", query="q")
+    run_research(sources, "research-c2", store=store, customer_id="cust-2", query="q")
+
+    assert calls == {"docs.internal/sla": 2}
 
 
 def test_the_chapter_10_inputs_run_end_to_end_through_the_refund(monkeypatch):

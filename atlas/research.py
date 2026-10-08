@@ -96,10 +96,14 @@ unfinished worker; `research_worker` carries a `RetryPolicy` whose default
 
 Chapter 24, "Patterns from Production", retrofits this module with the
 memory horizon (Chapter 13's pattern) it had been missing:
-`research_ns`/`recall_finding`/`remember_finding` are
-`profile_ns`/`compact`/`reflect` (`atlas/memory.py`) repointed at research
-findings instead of a customer profile. The chapter's own code stops at the
-three store functions, so no call site is invented here.
+`research_ns`/`recall_finding`/`remember_finding` are `profile_ns`
+(`atlas/memory.py`) and the `recall`/`remember` nodes (`atlas/graph.py`)
+repointed at research findings instead of a customer profile. Findings are
+the map-reduce's dicts, and a run with an error finding is never cached, so
+a source that was down once is looked up again next time rather than
+served as unavailable for 30 days. The call site is `atlas/run.py`'s
+`run_research`: given a store, a customer and a query, it recalls before
+the fan-out and remembers after a fresh run.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -359,9 +363,10 @@ research_graph = research_builder.compile()  # the map-reduce pipeline
 
 # --- Chapter 24: the memory horizon this extension was missing -------------
 #
-# Chapter 13's pattern (atlas/memory.py's profile_ns/compact/reflect),
-# repointed at research findings instead of a customer profile - see "The
-# refactor: giving the research extension a memory horizon".
+# Chapter 13's pattern (profile_ns in atlas/memory.py, the recall/remember
+# nodes in atlas/graph.py), repointed at research findings instead of a
+# customer profile - see "The refactor: giving the research extension a
+# memory horizon". atlas/run.py's run_research calls both functions.
 
 DEFAULT_TTL_DAYS = 30
 
@@ -376,8 +381,10 @@ def research_ns(customer_id: str) -> tuple[str, ...]:
     return ("customer", customer_id, "research-findings")
 
 
-def recall_finding(store: BaseStore, customer_id: str, query: str) -> list[str] | None:
-    """Chapter 13's recall(), pointed at research findings instead of a
+def recall_finding(
+    store: BaseStore, customer_id: str, query: str
+) -> list[dict] | None:
+    """Chapter 13's recall, pointed at research findings instead of a
     profile. Returns None on a miss OR a stale hit - both mean re-derive."""
     item = store.get(research_ns(customer_id), query)
     if item is None:
@@ -389,10 +396,15 @@ def recall_finding(store: BaseStore, customer_id: str, query: str) -> list[str] 
 
 
 def remember_finding(
-    store: BaseStore, customer_id: str, query: str, findings: list[str]
-) -> None:
+    store: BaseStore, customer_id: str, query: str, findings: list[dict]
+) -> bool:
+    """Cache a run's findings, unless any of them is an error: a source that
+    was down once is retried next time, not served as down for 30 days."""
+    if any("error" in finding for finding in findings):
+        return False
     store.put(
         research_ns(customer_id),
         query,
         {"findings": findings, "recorded_at": datetime.now(timezone.utc).isoformat()},
     )
+    return True

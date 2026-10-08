@@ -29,9 +29,10 @@ the same way `web_research`'s already is, so no live model call happens.
 
 Chapter 24, "Patterns from Production", adds the memory-horizon retrofit:
 `research_ns`/`recall_finding`/`remember_finding`, Chapter 13's
-`profile_ns`/`compact`/`reflect` pattern repointed at research findings. No
-live call and no external service - `store.put`/`store.get` against a real
-`InMemoryStore`, same convention as tests/test_memory.py."""
+`profile_ns` and `recall`/`remember` pattern repointed at research findings.
+No live call and no external service - `store.put`/`store.get` against a
+real `InMemoryStore`, same convention as tests/test_memory.py. The call
+site, `atlas/run.py`'s `run_research`, is tested in tests/test_run.py."""
 
 import inspect
 import os
@@ -666,19 +667,34 @@ def test_recall_finding_returns_none_on_a_genuine_miss():
     assert recall_finding(store, "cust-1", "return policy?") is None
 
 
+FOUND = [{"source": "docs.internal/refund-policy", "result": "30-day window."}]
+
+
 def test_remember_finding_then_recall_finding_round_trips():
     """The write/read pair: a fresh remember_finding is recallable
-    immediately - no TTL has elapsed yet."""
+    immediately - no TTL has elapsed yet. Findings are the map-reduce's
+    dicts, stored and returned as they are."""
     store = InMemoryStore()
 
-    remember_finding(store, "cust-1", "return policy?", ["30-day window."])
+    assert remember_finding(store, "cust-1", "return policy?", FOUND) is True
 
-    assert recall_finding(store, "cust-1", "return policy?") == ["30-day window."]
+    assert recall_finding(store, "cust-1", "return policy?") == FOUND
+
+
+def test_remember_finding_never_caches_a_run_with_an_error_finding():
+    """A source that was down once must be looked up again next time, not
+    served as unavailable for 30 days."""
+    store = InMemoryStore()
+    findings = [*FOUND, {"source": "web/gone", "error": "source unreachable"}]
+
+    assert remember_finding(store, "cust-1", "return policy?", findings) is False
+
+    assert recall_finding(store, "cust-1", "return policy?") is None
 
 
 def test_recall_finding_is_scoped_per_customer():
     store = InMemoryStore()
-    remember_finding(store, "cust-1", "return policy?", ["30-day window."])
+    remember_finding(store, "cust-1", "return policy?", FOUND)
 
     assert recall_finding(store, "cust-2", "return policy?") is None
 
@@ -691,7 +707,7 @@ def test_recall_finding_treats_a_stale_hit_as_a_miss():
     store.put(
         research_ns("cust-1"),
         "return policy?",
-        {"findings": ["30-day window."], "recorded_at": stale.isoformat()},
+        {"findings": FOUND, "recorded_at": stale.isoformat()},
     )
 
     assert recall_finding(store, "cust-1", "return policy?") is None
@@ -759,10 +775,10 @@ def test_recall_finding_returns_a_hit_just_inside_the_ttl_window():
     store.put(
         research_ns("cust-1"),
         "return policy?",
-        {"findings": ["30-day window."], "recorded_at": fresh.isoformat()},
+        {"findings": FOUND, "recorded_at": fresh.isoformat()},
     )
 
-    assert recall_finding(store, "cust-1", "return policy?") == ["30-day window."]
+    assert recall_finding(store, "cust-1", "return policy?") == FOUND
 
 
 # --- Chapter 23: the report is screened before the coordinator reads it ----
