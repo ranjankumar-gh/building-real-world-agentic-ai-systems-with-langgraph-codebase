@@ -2,6 +2,9 @@
 
 See Chapter 2, "Pinning the environment". Wire this as the first CI step, before
 the test suite - it turns the tested-version matrix into a gate instead of a claim.
+It compares version strings and imports neither package, so it cannot see a
+deprecation warning; those surface when the code runs, in the test suite, where
+pyproject.toml's `filterwarnings` turns them into failures (Chapter 26).
 """
 
 import sys

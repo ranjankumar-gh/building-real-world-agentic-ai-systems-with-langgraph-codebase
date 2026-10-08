@@ -23,3 +23,17 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+# Chapter 26: a deprecation is a failing check, not a log line. Only the two
+# frameworks' own deprecation classes fail the run; LangChainBetaWarning
+# subclasses DeprecationWarning directly, not these, so a beta surface used
+# on purpose still passes. The last matching entry wins, so each ignore below
+# must stay after the errors.
+filterwarnings = [
+    "error::langgraph.warnings.LangGraphDeprecationWarning",
+    "error::langchain_core._api.deprecation.LangChainDeprecationWarning",
+    # Added 2026-10-08: trustcall (a LangMem dependency, not Atlas code) still
+    # imports Send from langgraph.constants. Remove when LangMem's pin moves.
+    "ignore:Importing Send:langgraph.warnings.LangGraphDeprecationWarning:trustcall",
+]
