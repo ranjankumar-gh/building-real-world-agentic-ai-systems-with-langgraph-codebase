@@ -190,7 +190,7 @@ def _tag_block(block: str | dict[str, Any], source: str) -> str | dict[str, Any]
 
 def scan_for_injection(content: Content) -> bool:
     """A cheap, hand-rolled syntactic check - fake role markers, common
-    override phrases. Catches the obvious cases; Production Considerations
+    override phrases. Catches the obvious cases; Production considerations
     covers what it deliberately does not catch."""
     return bool(INJECTION_PATTERNS.search(_text_of(content)))
 
