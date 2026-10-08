@@ -66,7 +66,7 @@ def default_embeddings() -> Embeddings:
 
 def chunk_article(text: str, size: int = 400, overlap: int = 50) -> list[str]:
     """Fixed-size windows with overlap: a sentence cut at one boundary
-    reads whole in the neighbouring chunk."""
+    reads whole in the neighboring chunk."""
     if overlap < 0 or size <= overlap:
         raise ValueError("need 0 <= overlap < size, or the window never advances")
     chunks, start = [], 0

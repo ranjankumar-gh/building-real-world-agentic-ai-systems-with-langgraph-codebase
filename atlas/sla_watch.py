@@ -438,7 +438,7 @@ def _builder(served: bool) -> StateGraph:
 
 
 def build_sla_watch_graph(store: BaseStore | None = None) -> Pregel:
-    """The in-process graph, on Chapter 9 and 13's dev/test defaults."""
+    """The in-process graph, on Chapters 9 and 13's dev/test defaults."""
     return _builder(served=False).compile(
         checkpointer=InMemorySaver(),
         store=store or InMemoryStore(),
