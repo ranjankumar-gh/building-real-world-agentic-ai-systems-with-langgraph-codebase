@@ -391,7 +391,7 @@ def recall_finding(
         return None
     recorded_at = datetime.fromisoformat(item.value["recorded_at"])
     if datetime.now(timezone.utc) - recorded_at > timedelta(days=DEFAULT_TTL_DAYS):
-        return None  # a flat 30-day default - Exercise 3 makes this per-fact-kind
+        return None
     return item.value["findings"]
 
 
