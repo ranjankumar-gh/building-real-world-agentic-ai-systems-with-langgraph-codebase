@@ -71,7 +71,6 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph.state import CompiledStateGraph
-from langsmith import trace
 
 from atlas.audit import AuditGate
 from atlas.containment import RevocationGate
@@ -81,6 +80,7 @@ from atlas.memory import build_dev_store
 from atlas.middleware import AuthorityGate, approval, pii, summarizer
 from atlas.security import AtlasContext, InjectionGuard, RoleAuthorityGate
 from atlas.tools import lookup_ticket, search_kb, set_ticket_status
+from atlas.tracing import trace_config
 
 RESOLVE_TOOLS = [search_kb, lookup_ticket, set_ticket_status]
 
@@ -267,24 +267,22 @@ async def build_resolve_agent() -> CompiledStateGraph:
 
 
 def run_resolve(inputs: dict, config: dict) -> dict:
-    """Chapter 20: the attribution layer around every turn `resolve_agent`
-    takes. See "Naming the fleet: attribution across the supervisor
-    topology". `name="resolve-agent"` above turns the span itself into a
-    labeled one; the `trace()` context here adds tags and metadata ONCE, at
-    this single entry point, rather than scattering `tags=` across call
-    sites where they could drift out of sync. `thread_id` and `customer_id`
-    are expected on `config["configurable"]` by the caller - Chapter 9/13's
-    existing identifiers. There is no route tag: the route is triage's
-    output, decided inside the turn, not known here at invoke time (the
-    `triage` span carries it). Building/entering `trace()` needs no live
-    LangSmith connection - it is a local context manager that only submits
-    data once `LANGSMITH_TRACING` is actually "true"."""
-    with trace(
-        name="atlas-turn",
-        tags=["atlas", "support"],
-        metadata={
-            "thread_id": config["configurable"]["thread_id"],
-            "customer_id": config["configurable"]["customer_id"],
-        },
-    ):
-        return resolve_agent.invoke(inputs, config)
+    """Invoke `resolve_agent` on its own, named and tagged the way Chapter
+    20's `trace_config` (atlas/tracing.py) names every support run: root
+    span "atlas-support", tags ["atlas", "support"], and `thread_id` and
+    `customer_id` as metadata, so the three-clicks filter finds it beside
+    the graph's own runs. `trace_config` stays the one place those names
+    are set; this wrapper only reads the two ids off
+    `config["configurable"]` (Chapter 9/13's identifiers) and merges the
+    result over the caller's config. There is no route tag: the route is
+    triage's output, decided inside the turn. Naming a run needs no live
+    LangSmith connection; spans are sent only once `LANGSMITH_TRACING` is
+    "true"."""
+    configurable = config["configurable"]
+    named = trace_config(
+        "support", configurable["thread_id"], configurable["customer_id"]
+    )
+    return resolve_agent.invoke(
+        inputs,
+        {**config, **named, "configurable": {**configurable, **named["configurable"]}},
+    )
