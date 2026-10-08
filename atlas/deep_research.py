@@ -66,10 +66,21 @@ without anyone deciding it should. See "Naming the fleet: attribution
 across the supervisor topology": every ephemeral sub-agent the `task` tool
 spawns shows up in a trace tree under `source_researcher`, distinguishing
 "three sub-agents spawned" from "the source_researcher ran three times."
+
+Chapter 23, "Security, Privacy, and Governance", applies here too, through
+Appendix E: source text is untrusted content, and three models read it.
+`InjectionGuard` (atlas/security.py) screens every tool result each of them
+sees - the main agent (`source_lookup`, and the `/findings/` files it reads
+back), `source_researcher`, and the harness's general-purpose sub-agent,
+which inherits the main agent's tools. deepagents builds that sub-agent's
+middleware stack WITHOUT the caller's `middleware=`, so it is re-declared
+under its own name with the guard added; the harness then uses that spec in
+place of its default. Chapter 18's printed listing predates the guard.
 """
 
 from deepagents import create_deep_agent
 from deepagents.backends.store import StoreBackend
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_config, get_stream_writer
@@ -77,6 +88,7 @@ from langgraph.runtime import Runtime
 
 from atlas.memory import SAFE_ID, build_dev_store
 from atlas.research import SourceUnavailable, search_source
+from atlas.security import InjectionGuard
 
 
 @tool
@@ -104,7 +116,11 @@ source_researcher = {
         "/findings/<source>.md via write_file. Investigate only the assigned source."
     ),
     "tools": [source_lookup],
+    "middleware": [InjectionGuard()],  # Chapter 23: source text is untrusted
 }
+
+# The harness's own general-purpose sub-agent, with the same guard.
+general_purpose = {**GENERAL_PURPOSE_SUBAGENT, "middleware": [InjectionGuard()]}
 
 
 def research_namespace(runtime: Runtime) -> tuple[str, str, str]:
@@ -134,7 +150,8 @@ deep_research_agent = create_deep_agent(
         "each to source_researcher via the task tool, track progress with write_todos, "
         "and compose a final report from the files under /findings/."
     ),
-    subagents=[source_researcher],
+    subagents=[source_researcher, general_purpose],
+    middleware=[InjectionGuard()],
     backend=StoreBackend(store=store, namespace=research_namespace),
     checkpointer=checkpointer,
     store=store,
