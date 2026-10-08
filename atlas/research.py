@@ -53,6 +53,12 @@ report is how the coordinator sees the findings: its model reads only
 `messages`. It is a user-side message, so the coordinator's next call still
 ends on a user turn after its tool result (langchain-anthropic merges the
 `ToolMessage` and the report into one user turn).
+The report carries text a specialist's search returned into a user-role
+turn, so `report` passes the finding through `atlas/security.py`'s
+`screen_untrusted` (Chapter 23) first: a finding that matches the injection
+scan is withheld, and the rest is wrapped in `<untrusted-content>` tags, the
+same two checks `InjectionGuard` runs on a tool result. `findings` keeps the
+raw text.
 
 `build_supervisor_graph` wires it: `supervisor` -> a specialist (by the
 handoff's `Command`) -> `route_from_specialist` -> back to `supervisor`, or
@@ -109,6 +115,7 @@ from langgraph.store.base import BaseStore
 from langgraph.types import Command, RetryPolicy, Send
 
 from atlas.memory import SAFE_ID
+from atlas.security import screen_untrusted
 from atlas.tools import search_kb, text_of, web_search_tool
 
 
@@ -178,7 +185,8 @@ supervisor = create_agent(
 
 def report(specialist: str, finding: str) -> HumanMessage:
     """The finding, as the coordinator reads it on its next turn."""
-    return HumanMessage(f"{specialist} found: {finding}", name=specialist)
+    screened = screen_untrusted(finding, source=specialist)  # Chapter 23
+    return HumanMessage(f"{specialist} found: {screened}", name=specialist)
 
 
 def web_research(state: ResearchState) -> dict:
