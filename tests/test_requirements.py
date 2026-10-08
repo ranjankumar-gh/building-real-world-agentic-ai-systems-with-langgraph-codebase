@@ -3,7 +3,7 @@ requirements.txt`) has to install what `uv sync` installs from `uv.lock`.
 
 requirements.txt is generated, never edited by hand:
 
-    uv export --format requirements-txt --no-hashes --frozen --no-emit-project
+    uv export --format requirements-txt --no-hashes --frozen --no-emit-project --offline
 
 This test fails when the lock moves and the export was not re-run: every
 package pinned in uv.lock (the project itself aside) must appear in
