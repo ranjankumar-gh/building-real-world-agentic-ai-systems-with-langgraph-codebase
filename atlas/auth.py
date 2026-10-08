@@ -22,7 +22,7 @@ Agent Server fills from `@auth.authenticate` - and from the ticket, never
 from a `context` the caller sent. A run with no proved role gets the role
 "anonymous", which `ROLE_TOOL_PERMISSIONS` grants nothing: default deny.
 
-DELIBERATELY NOT WIRED INTO `langgraph.json`. Adding the `auth` key makes
+Not wired into `langgraph.json` by default. Adding the `auth` key makes
 every request to a locally running server need a token. Chapter 23 prints
 the one-line config change to make when you deploy this for real:
 

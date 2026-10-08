@@ -1,7 +1,7 @@
 """Hello-world Atlas: the smallest correct baseline, built with create_agent.
 
 See Chapter 2, "Hello-world Atlas". Direct replacement for Chapter 1's
-atlas/naive.py - same job, no hand-rolled while loop. Still not durable
+atlas/naive.py - same job, no hand-rolled while loop. It is not durable
 (no checkpointer; Chapter 9), not supervised (no HITL; Chapter 11), and not
 traced (Chapter 20). create_agent hands the loop to the runtime, but its
 only loop bound is a 9,999-step recursion limit and a raising tool still

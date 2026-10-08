@@ -19,7 +19,7 @@ under the root, so `has(tags, "atlas")` alone also returns the model, tool,
 and node spans, and the judge would grade a tool call as if it were an
 answer. `error=False` drops runs that raised: they have no answer to grade.
 
-Each tick scores the window that has just closed, not the one still open:
+Each tick scores the window that has just closed, not the one in progress:
 it reads from `now - 2 * window` and skips any run that started after
 `now - window`, so a run gets a full schedule period (Chapter 22's cron
 fires every 15 minutes) to finish before it is graded, and consecutive

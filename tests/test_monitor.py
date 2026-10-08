@@ -135,7 +135,7 @@ def test_run_quality_monitor_reads_only_root_runs_inside_its_window(monkeypatch)
 
 def test_run_quality_monitor_skips_open_window_and_in_flight_runs(monkeypatch):
     """A run still in flight has outputs=None, and online_judge raises
-    KeyError: 'outputs' on it; a run in the still-open window belongs to the
+    KeyError: 'outputs' on it; a run in the current, unfinished window belongs to the
     next tick. Both are skipped, the tick does not abort, and the settled run
     in the closed window is still scored."""
     runs = [
