@@ -1,32 +1,41 @@
 """Appendix G, "Retrieval for Atlas (the RAG the Book Assumes)" -
-atlas/retrieval.py: chunk_article, cosine_similarity, EmbeddedKB, and the
-module-level search_kb_impl/recall_at_k wrappers.
+atlas/retrieval.py: chunk_article, cosine_similarity, EmbeddedKB, the
+search_kb_embedded node adapter, and the search_kb_impl/recall_at_k
+functions the appendix prints.
 
-`EmbeddedKB.__init__` calls `default_embeddings()` (which needs a live
-OPENAI_API_KEY) unless an `embeddings=` object is passed in - the same
-dev/prod seam as Chapter 13's `build_dev_store`/`build_prod_store`. Every
-test below passes a hand-rolled, deterministic, offline `_FakeEmbeddings`
-(bag-of-hashed-words) so the pipeline's actual logic - chunking, cosine
-ranking, the 0.3 no-match threshold, recall@k - is exercised with no
-network call and no API key, the same no-live-API convention as
-tests/test_triage.py's monkeypatched classify(). One test at the bottom,
-`test_default_embeddings_requires_a_live_openai_key`, IS skip-guarded and
-exercises the real `default_embeddings()` path - see `requires_openai`,
-mirroring tests/test_memory.py's guard for `build_prod_store`."""
+`EmbeddedKB` calls `default_embeddings()` (which needs a live
+OPENAI_API_KEY) on its first search unless an `embeddings=` object is
+passed in. Every test below passes a hand-rolled, deterministic, offline
+`_FakeEmbeddings` (bag-of-hashed-words) or a `_FailingEmbeddings` that
+stands in for a provider outage, so the pipeline's logic - chunking, cosine
+ranking, the 0.3 no-match threshold, recall@k, and the escalation of a
+provider failure through `retrieve` - runs with no network call and no API
+key. One test at the bottom,
+`test_default_embeddings_builds_a_real_client_and_answers_a_query`, IS
+skip-guarded and exercises the real `default_embeddings()` path - see
+`requires_openai`, mirroring tests/test_memory.py's guard for
+`build_prod_store`."""
 
 import hashlib
 import os
 
 import pytest
 
+from langchain_core.messages import HumanMessage
+
+import atlas.graph as graph
+import atlas.retrieval as retrieval
+from atlas.context import select_docs
 from atlas.retrieval import (
     EmbeddedKB,
     chunk_article,
     cosine_similarity,
     default_embeddings,
     recall_at_k,
+    search_kb_embedded,
     search_kb_impl,
 )
+from atlas.tools import _KB, KnowledgeBaseUnavailable
 
 requires_openai = pytest.mark.skipif(
     not os.environ.get("OPENAI_API_KEY"),
@@ -79,6 +88,16 @@ def test_chunk_article_rejects_a_non_advancing_window():
         chunk_article("some text", size=50, overlap=50)
 
 
+def test_chunk_article_rejects_a_negative_overlap():
+    with pytest.raises(ValueError):
+        chunk_article("some text", size=50, overlap=-1)
+
+
+def test_every_seeded_article_is_a_single_chunk():
+    # the overlap is there for a real KB; the two seeded articles never split
+    assert all(len(chunk_article(text)) == 1 for text in _KB.values())
+
+
 # --- cosine_similarity ---------------------------------------------------
 
 
@@ -96,28 +115,66 @@ def test_cosine_similarity_handles_a_degenerate_zero_vector():
     assert cosine_similarity([0.0, 0.0], [1.0, 2.0]) == 0.0
 
 
+def test_cosine_similarity_rejects_vectors_of_different_lengths():
+    # zip() would silently truncate: two embedding models mixed in one index
+    with pytest.raises(ValueError):
+        cosine_similarity([1.0, 0.0, 1.0], [1.0, 0.0])
+
+
 # --- EmbeddedKB.search ---------------------------------------------------
 
+REFUND = "Refunds are available within 30 days of purchase."
 
-def test_search_returns_the_chunk_matching_the_query():
+
+class _FailingEmbeddings:
+    """A provider that is down: every call raises its own error type."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed_query(self, text: str) -> list[float]:
+        self.calls += 1
+        raise ConnectionError("embedding provider unreachable")
+
+
+def test_search_returns_scored_docs_carrying_the_article_id():
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
 
     results = kb.search("Refunds are available", k=1)
 
-    assert results == ["Refunds are available within 30 days of purchase."]
+    assert len(results) == 1
+    doc = results[0]
+    assert doc["id"] == "kb:refund window#0"
+    assert doc["text"] == REFUND
+    assert 0.3 < doc["score"] <= 1.0
 
 
 def test_search_returns_nothing_for_a_query_sharing_no_words_with_the_kb():
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
 
-    results = kb.search("zzz qqq xxx", k=3)
+    assert kb.search("zzz qqq xxx", k=3) == []
 
-    assert results == []
+
+def test_search_ranks_by_score_alone():
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+
+    results = kb.search("Refunds are available on the sign-in page", k=2)
+
+    scores = [doc["score"] for doc in results]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_search_docs_go_through_select_docs():
+    # the shape Chapter 12's select_docs ranks and caps: no TypeError
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+
+    kept = select_docs(kb.search("Refunds are available"), 2000)
+
+    assert kept and kept[0]["text"] == REFUND
 
 
 def test_search_caches_the_index_across_calls():
-    fake = _FakeEmbeddings()
-    kb = EmbeddedKB(embeddings=fake)
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
 
     kb.search("Refunds are available")
     index_after_first_call = kb._index
@@ -126,44 +183,143 @@ def test_search_caches_the_index_across_calls():
     assert kb._index is index_after_first_call
 
 
-# --- EmbeddedKB.recall_at_k ------------------------------------------------
+def test_constructing_a_kb_needs_no_key_and_makes_no_call(monkeypatch):
+    def boom() -> None:
+        raise AssertionError("default_embeddings called before the first search")
+
+    monkeypatch.setattr(retrieval, "default_embeddings", boom)
+
+    kb = EmbeddedKB()
+
+    assert kb._index is None
 
 
-def test_recall_at_k_finds_the_expected_article_at_k1():
+def test_a_provider_failure_raises_knowledge_base_unavailable():
+    kb = EmbeddedKB(embeddings=_FailingEmbeddings())
+
+    with pytest.raises(KnowledgeBaseUnavailable):
+        kb.search("Refunds are available")
+
+
+def test_a_missing_key_on_first_search_raises_knowledge_base_unavailable(
+    monkeypatch,
+):
+    def no_key() -> None:
+        raise RuntimeError("Missing credentials")  # what init_embeddings raises
+
+    monkeypatch.setattr(retrieval, "default_embeddings", no_key)
+
+    with pytest.raises(KnowledgeBaseUnavailable):
+        EmbeddedKB().search("Refunds are available")
+
+
+# --- the node adapter, through retrieve ------------------------------------
+
+
+def _ask(question: str) -> dict:
+    return {"messages": [HumanMessage(question)], "retrieve_attempts": 0}
+
+
+def test_search_kb_embedded_reads_the_last_user_turn():
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
 
-    assert kb.recall_at_k("Refunds are available", "refund window", k=1) is True
+    docs = search_kb_embedded([HumanMessage("Refunds are available")], kb)
+
+    assert [doc["id"] for doc in docs][:1] == ["kb:refund window#0"]
+
+
+def test_search_kb_embedded_with_no_question_returns_nothing():
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+
+    assert search_kb_embedded([], kb) == []
+
+
+def test_retrieve_with_the_embedded_adapter_routes_a_hit_to_answer(monkeypatch):
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+    monkeypatch.setattr(graph, "search_kb", lambda m: search_kb_embedded(m, kb))
+
+    state = _ask("Refunds are available")
+    update = graph.retrieve(state)
+
+    assert update["retrieved"][0]["id"] == "kb:refund window#0"
+    assert graph.route_after_retrieve({**state, **update}) == "answer"
+
+
+def test_retrieve_with_the_embedded_adapter_escalates_a_provider_outage(
+    monkeypatch,
+):
+    failing = _FailingEmbeddings()
+    kb = EmbeddedKB(embeddings=failing)
+    monkeypatch.setattr(graph, "search_kb", lambda m: search_kb_embedded(m, kb))
+
+    state = _ask("Refunds are available")
+    update = graph.retrieve(state)
+
+    assert "embedding provider" in update["error"]
+    assert graph.route_after_retrieve({**state, **update}) == "escalate"
+    assert failing.calls == 1  # recorded once, not retried
+
+
+def test_retrieve_with_the_embedded_adapter_retries_a_miss_then_escalates(
+    monkeypatch,
+):
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+    monkeypatch.setattr(graph, "search_kb", lambda m: search_kb_embedded(m, kb))
+
+    state = _ask("zzz qqq xxx")
+    routes = []
+    for _ in range(graph.MAX_RETRIEVE_ATTEMPTS):
+        state = {**state, **graph.retrieve(state)}
+        routes.append(graph.route_after_retrieve(state))
+
+    assert routes == ["retrieve", "retrieve", "escalate"]
+
+
+# --- search_kb_impl and recall_at_k ----------------------------------------
+
+
+def test_search_kb_impl_matches_embeddedkb_search():
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+
+    assert search_kb_impl("Refunds are available", k=1, kb=kb) == kb.search(
+        "Refunds are available", k=1
+    )
+
+
+def test_search_kb_impl_builds_one_shared_index_lazily(monkeypatch):
+    monkeypatch.setattr(retrieval, "_default_kb", None)
+    monkeypatch.setattr(retrieval, "default_embeddings", _FakeEmbeddings)
+
+    search_kb_impl("Refunds are available")
+    shared = retrieval._default_kb
+    search_kb_impl("Use the sign-in page")
+
+    assert shared is not None and retrieval._default_kb is shared
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("How long are refunds available after purchase?", "refund window"),
+        ("Where is the forgot password link?", "reset password"),
+    ],
+)
+def test_recall_at_k_passes_on_the_seeded_kb(query, expected):
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+
+    assert recall_at_k(query, expected, k=1, kb=kb) is True
 
 
 def test_recall_at_k_is_false_when_the_wrong_article_is_expected():
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
 
-    assert kb.recall_at_k("Refunds are available", "reset password", k=1) is False
+    assert recall_at_k("Refunds are available", "reset password", k=1, kb=kb) is False
 
 
-def test_recall_at_k_finds_the_reset_password_article():
+def test_recall_at_k_is_false_on_a_miss():
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
 
-    assert (
-        kb.recall_at_k("Use the sign-in page to reset", "reset password", k=1) is True
-    )
-
-
-# --- module-level convenience wrappers -----------------------------------
-
-
-def test_search_kb_impl_wrapper_matches_embeddedkb_search():
-    fake = _FakeEmbeddings()
-
-    assert search_kb_impl("Refunds are available", embeddings=fake, k=1) == [
-        "Refunds are available within 30 days of purchase."
-    ]
-
-
-def test_recall_at_k_wrapper_matches_embeddedkb_recall_at_k():
-    fake = _FakeEmbeddings()
-
-    assert recall_at_k("Refunds are available", "refund window", embeddings=fake, k=1)
+    assert recall_at_k("zzz qqq xxx", "refund window", kb=kb) is False
 
 
 # --- the live-embedding-provider seam (external-service exception) -------
@@ -174,12 +330,12 @@ def test_default_embeddings_builds_a_real_client_and_answers_a_query():
     """Skipped by default - see `requires_openai` above. Exercises the
     actual, un-faked path: EmbeddedKB() with no embeddings= argument calls
     default_embeddings() -> init_embeddings('openai:text-embedding-3-small'),
-    a live network call."""
+    a live network call, on its first search."""
     kb = EmbeddedKB()
 
     results = kb.search("What is the refund window?", k=1)
 
-    assert results  # a real embedding model should surface the refund article
+    assert results and results[0]["id"] == "kb:refund window#0"
 
 
 def test_default_embeddings_without_a_key_raises_immediately():

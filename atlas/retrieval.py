@@ -1,32 +1,30 @@
 """Appendix G, "Retrieval for Atlas (the RAG the Book Assumes)" - what
-actually sits behind atlas/tools.py's `search_kb`.
+could sit behind atlas/tools.py's `search_kb`.
 
-Chapter 7 gave `search_kb` an interface - a query in, a ranked result or a
-"no match" string out - and treated everything behind that interface as a
-seeded backend, deliberately not re-taught (`atlas/tools.py`'s `_KB`, a
-plain substring-matched dict). This module is the appendix's "smallest
-pipeline that makes search_kb's contract real": chunk each seeded article,
-embed every chunk, and answer a query with the closest chunks by cosine
-similarity.
+Chapter 7 gave `search_kb` an interface - a query in, an article or a "no
+match" string out - and treated everything behind it as a seeded backend
+(`atlas/tools.py`'s `_KB`, a plain substring-matched dict). The graph never
+calls that tool directly: `atlas/helpers.py`'s `search_kb` adapts it to the
+node convention, messages in and scored `Doc`s out, which Chapter 12's
+`select_docs` ranks and caps. This module is the appendix's smallest
+embedding pipeline that honours the same node contract: chunk each seeded
+article, embed every chunk, and answer a query with the closest chunks as
+`Doc(id, text=chunk, score=cosine)`.
 
-This is NOT wired in as `search_kb`'s default implementation, and importing
-this module never makes a network call. `atlas/tools.py`'s dict-based
-`search_kb` stays the default every other chapter's code and tests run
-against - the book's own "no external account, no network call" promise
-("Using the Code Examples"). The embedding pipeline here is the explicit,
-optional seam a real deployment swaps in: the same dev/prod split as
-Chapter 13's `build_dev_store`/`build_prod_store`. It needs a live
-embedding provider (`OPENAI_API_KEY`, `langchain-openai` installed), so it
-is exercised behind a skip guard in `tests/test_retrieval.py`, never on the
-default test path. `default_embeddings()` only imports/calls
-`init_embeddings` when a caller actually asks for it - constructing an
-`EmbeddedKB` (or calling `search_kb_impl`/`recall_at_k`) without an
-explicit `embeddings=` argument.
+It is NOT wired in as the default. `atlas/helpers.py`'s dict-backed adapter
+stays what every chapter's code and tests run against - the book's "no
+external account, no network call" promise. `search_kb_embedded` is the
+drop-in a deployment puts in that adapter's place.
 
-Reuses Chapter 13's `text-embedding-3-small` (1536 dimensions) rather than
-a second embedding model - the same "keep the embedding model fixed across
-write and query" discipline Chapter 13 argued for semantic memory applies
-here too.
+Nothing here touches the provider until the first search: importing the
+module, or constructing an `EmbeddedKB`, needs no key. Every provider call
+goes through `EmbeddedKB._embed`, which turns any provider failure into
+`KnowledgeBaseUnavailable`, the error Chapter 6's `retrieve` node records
+and escalates on; a raw provider exception would instead be retried by
+`retrieve`'s `RetryPolicy` and then fail the run.
+
+Reuses Chapter 13's `text-embedding-3-small` (1536 dimensions): keep one
+embedding model across write and query.
 """
 
 from __future__ import annotations
@@ -34,7 +32,11 @@ from __future__ import annotations
 import math
 from typing import Protocol
 
-from atlas.tools import _KB
+from atlas.helpers import _last_user_text
+from atlas.state import Doc
+from atlas.tools import _KB, KnowledgeBaseUnavailable
+
+NO_MATCH_BELOW = 0.3  # a starting point; set it from your recall_at_k set
 
 
 class Embeddings(Protocol):
@@ -46,24 +48,19 @@ class Embeddings(Protocol):
 
 
 def default_embeddings() -> Embeddings:
-    """Lazy import + construction, exactly like Chapter 13's
-    `build_prod_store` - never called at import time, so importing this
-    module carries no network dependency. Raises immediately (via
-    `init_embeddings`) if `OPENAI_API_KEY` is not set, rather than failing
-    later on the first real query."""
+    """Chapter 13's model, imported and built only when called. Raises at
+    once if `OPENAI_API_KEY` is not set."""
     from langchain.embeddings import init_embeddings
 
     return init_embeddings("openai:text-embedding-3-small")
 
 
 def chunk_article(text: str, size: int = 400, overlap: int = 50) -> list[str]:
-    """Fixed-size chunking with overlap - the simplest strategy that keeps
-    a chunk's meaning intact without splitting mid-sentence too often. Not
-    a semantic chunker; the seeded KB is small enough not to need one."""
-    if size <= overlap:
-        raise ValueError("size must be greater than overlap")
-    chunks: list[str] = []
-    start = 0
+    """Fixed-size windows with overlap: a sentence cut at one boundary
+    reads whole in the neighbouring chunk."""
+    if overlap < 0 or size <= overlap:
+        raise ValueError("need 0 <= overlap < size, or the window never advances")
+    chunks, start = [], 0
     while start < len(text):
         chunks.append(text[start : start + size])
         start += size - overlap
@@ -71,88 +68,76 @@ def chunk_article(text: str, size: int = 400, overlap: int = 50) -> list[str]:
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two embedding vectors. Returns 0.0 for a
-    degenerate (all-zero) vector instead of raising a divide-by-zero
-    error."""
+    """0.0 for an all-zero vector rather than a division by zero."""
+    if len(a) != len(b):
+        raise ValueError(f"vectors differ in length: {len(a)} vs {len(b)}")
     dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / norm if norm else 0.0
 
 
 class EmbeddedKB:
-    """Chunks and embeds `atlas.tools._KB` once, then answers a query with
-    the closest chunks by cosine similarity - Appendix G's "smallest
-    pipeline that makes search_kb's contract real," built over the SAME
-    seeded articles Chapter 7's dict-based `search_kb` already uses, not a
-    second knowledge base.
-
-    Building the index calls `embed_query` once per chunk, so it is lazy:
-    nothing is embedded until the first `.search()`/`.recall_at_k()` call,
-    and the index is cached after that."""
+    """`_KB`'s articles, chunked and embedded on first search, then cached."""
 
     def __init__(self, embeddings: Embeddings | None = None) -> None:
-        self._embeddings = embeddings if embeddings is not None else default_embeddings()
+        self._embeddings = embeddings  # None: default_embeddings() on first use
         self._index: list[tuple[str, str, list[float]]] | None = None
+
+    def _embed(self, text: str) -> list[float]:
+        try:
+            if self._embeddings is None:
+                self._embeddings = default_embeddings()
+            return self._embeddings.embed_query(text)
+        except Exception as exc:  # any provider failure: escalate, never retry
+            raise KnowledgeBaseUnavailable(f"embedding provider: {exc}") from exc
 
     def _build_index(self) -> list[tuple[str, str, list[float]]]:
         if self._index is None:
             self._index = [
-                (article_id, chunk, self._embeddings.embed_query(chunk))
+                (f"kb:{article_id}#{n}", chunk, self._embed(chunk))
                 for article_id, text in _KB.items()
-                for chunk in chunk_article(text)
+                for n, chunk in enumerate(chunk_article(text))
             ]
         return self._index
 
-    def search(self, query: str, k: int = 3) -> list[str]:
-        """The appendix's `search_kb_impl`: the top-k chunks by cosine
-        similarity, filtered below score 0.3 (treat as no match)."""
-        query_vec = self._embeddings.embed_query(query)
-        scored = [
-            (cosine_similarity(query_vec, vec), chunk)
-            for _article_id, chunk, vec in self._build_index()
+    def search(self, query: str, k: int = 3) -> list[Doc]:
+        """The top k chunks by cosine similarity, as the `Doc`s the
+        `retrieve` node expects. Below `NO_MATCH_BELOW`, nothing."""
+        query_vec = self._embed(query)
+        docs = [
+            Doc(id=doc_id, text=chunk, score=cosine_similarity(query_vec, vec))
+            for doc_id, chunk, vec in self._build_index()
         ]
-        top = sorted(scored, key=lambda pair: pair[0], reverse=True)[:k]
-        return [chunk for score, chunk in top if score > 0.3]
-
-    def recall_at_k(self, query: str, expected_article_id: str, k: int = 3) -> bool:
-        """Did the expected article's content place in the top k? A
-        retrieval-only metric - no model call, no agent involved - checked
-        BEFORE trusting any agent-level eval result that depends on
-        `search_kb` having worked.
-
-        The appendix's own sketch checks `expected_article_id in chunk`
-        (a substring match against the chunk TEXT); that only works if an
-        article's id happens to appear inside its own body text, which
-        `atlas.tools._KB`'s seeded articles do not guarantee (its keys are
-        short phrases like "refund window", and the article bodies never
-        repeat them verbatim). This implementation checks article-id
-        membership in the top-k index entries instead - the same question,
-        answered correctly against the real seeded KB shape."""
-        query_vec = self._embeddings.embed_query(query)
-        scored = [
-            (cosine_similarity(query_vec, vec), article_id)
-            for article_id, _chunk, vec in self._build_index()
-        ]
-        top_ids = {article_id for _score, article_id in sorted(scored, reverse=True)[:k]}
-        return expected_article_id in top_ids
+        top = sorted(docs, key=lambda doc: doc["score"], reverse=True)[:k]
+        return [doc for doc in top if doc["score"] > NO_MATCH_BELOW]
 
 
-def search_kb_impl(query: str, embeddings: Embeddings | None = None, k: int = 3) -> list[str]:
-    """Module-level convenience wrapper matching the appendix's own
-    function name - builds a throwaway `EmbeddedKB` per call. Prefer
-    constructing one `EmbeddedKB` and reusing it (the index is cached)
-    when answering more than one query."""
-    return EmbeddedKB(embeddings).search(query, k=k)
+def search_kb_embedded(messages: list, kb: EmbeddedKB) -> list[Doc]:
+    """Drop-in for `atlas.helpers.search_kb`: same messages in, same `Doc`s
+    out, so `retrieve`, `select_docs` and the escalation path are unchanged."""
+    query = _last_user_text(messages)
+    return kb.search(query) if query else []
+
+
+_default_kb: EmbeddedKB | None = None
+
+
+def search_kb_impl(query: str, k: int = 3, kb: EmbeddedKB | None = None) -> list[Doc]:
+    """The appendix's name for a search against one shared, lazily built
+    index (or the `kb` passed in)."""
+    global _default_kb
+    if kb is None:
+        if _default_kb is None:
+            _default_kb = EmbeddedKB()
+        kb = _default_kb
+    return kb.search(query, k=k)
 
 
 def recall_at_k(
-    query: str,
-    expected_article_id: str,
-    embeddings: Embeddings | None = None,
-    k: int = 3,
+    query: str, expected_article_id: str, k: int = 3, kb: EmbeddedKB | None = None
 ) -> bool:
-    """Module-level convenience wrapper - see `EmbeddedKB.recall_at_k`."""
-    return EmbeddedKB(embeddings).recall_at_k(query, expected_article_id, k=k)
+    """Did a chunk of the expected article place in the top k? Checked on
+    the article id each `Doc` carries, not the chunk text: `_KB`'s ids
+    ("refund window") never appear in their own articles."""
+    results = search_kb_impl(query, k=k, kb=kb)
+    return any(doc["id"].startswith(f"kb:{expected_article_id}#") for doc in results)
