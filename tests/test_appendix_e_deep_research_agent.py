@@ -164,8 +164,8 @@ def _guard_script(seen_by: dict[str, list[str]]):
 
 def test_form_2_screens_source_text_for_every_model_that_reads_it(monkeypatch):
     """source_lookup screens its own result, so an injected source is
-    withheld from all three models - including the harness's default
-    general-purpose sub-agent, which carries no guard of its own - and a
+    withheld from all three models - including the general-purpose
+    sub-agent - and a
     clean one reaches them tagged as untrusted content."""
     from langchain_anthropic import ChatAnthropic
 
@@ -191,13 +191,82 @@ def test_form_2_screens_source_text_for_every_model_that_reads_it(monkeypatch):
     assert sla and sla[0].startswith("<untrusted-content")
 
 
-def test_form_2_uses_the_harness_default_general_purpose_sub_agent():
-    """Screening lives in source_lookup, so no re-declared general-purpose
-    spec (and no import of deepagents' private constant) is needed."""
+def test_form_2_declares_its_own_guarded_general_purpose_sub_agent():
+    """The harness's default general-purpose sub-agent is built without the
+    caller's middleware. A sub-agent named "general-purpose" replaces it
+    (public API, documented on create_deep_agent's `subagents=`), with its
+    own strings, the main agent's tools, and InjectionGuard - and no import
+    of deepagents' private constant."""
     from atlas import deep_research
+    from atlas.security import InjectionGuard
 
+    spec = deep_research.general_purpose
     assert not hasattr(deep_research, "GENERAL_PURPOSE_SUBAGENT")
-    assert not hasattr(deep_research, "general_purpose")
+    assert spec["name"] == "general-purpose"
+    assert spec["description"] and spec["system_prompt"]
+    assert "tools" not in spec  # inherits the main agent's tools
+    assert any(isinstance(m, InjectionGuard) for m in spec["middleware"])
+    assert spec in deep_research.subagents
+
+
+def _findings_script(seen: list[str]):
+    """The main agent writes a finding that carries a payload (as a
+    source_researcher talked into it would), then delegates to the
+    general-purpose sub-agent, which reads that file back. Records the
+    tool results the general-purpose model is shown."""
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    def call(name: str, args: dict, call_id: str) -> dict:
+        return {"name": name, "args": args, "id": call_id}
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        system = " ".join(m.text for m in messages if isinstance(m, SystemMessage))
+        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        if "Atlas's deep research agent" in system:
+            if len(tool_messages) == 0:
+                msg = AIMessage("", tool_calls=[call(
+                    "write_file",
+                    {"file_path": "/findings/evil.md", "content": INJECTED},
+                    "m-write",
+                )])
+            elif len(tool_messages) == 1:
+                msg = AIMessage("", tool_calls=[call(
+                    "task",
+                    {"description": "summarize /findings/evil.md",
+                     "subagent_type": "general-purpose"},
+                    "m-gp",
+                )])
+            else:
+                msg = AIMessage("main done")
+        elif tool_messages:
+            seen.extend(m.text for m in tool_messages)
+            msg = AIMessage("gp done")
+        else:
+            msg = AIMessage("", tool_calls=[call(
+                "read_file", {"file_path": "/findings/evil.md"}, "gp-read"
+            )])
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    return _generate
+
+
+def test_the_general_purpose_sub_agent_reads_findings_through_the_guard(
+    monkeypatch,
+):
+    from langchain_anthropic import ChatAnthropic
+
+    from atlas.security import WITHHELD
+
+    seen: list[str] = []
+    monkeypatch.setattr(ChatAnthropic, "_generate", _findings_script(seen))
+
+    deep_research_agent.invoke(
+        {"messages": [{"role": "user", "content": "Summarize the findings."}]},
+        {"configurable": {"thread_id": "appendix-e-gp", "customer_id": "cust-42"}},
+    )
+
+    assert seen == [WITHHELD]
 
 
 RELAY = "Finding: " + INJECTED
