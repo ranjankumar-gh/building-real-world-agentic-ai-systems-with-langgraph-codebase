@@ -401,14 +401,18 @@ def test_run_sla_watch_reports_what_was_sent_so_the_pitfall_fails_the_eval(
         for draft in state["drafts"]:
             send_checkin.invoke(
                 {
-                    "key": sla_watch_module.checkin_key(draft["ticket_id"]),
+                    "key": sla_watch_module.checkin_key(
+                        draft["ticket_id"], draft["message"]
+                    ),
                     "ticket_id": draft["ticket_id"],
                     "message": draft["message"],
                 }
             )
         return {}
 
-    monkeypatch.setattr(sla_watch_module, "send_checkins", send_every_draft)
+    monkeypatch.setattr(
+        sla_watch_module, "make_send_checkins", lambda served: send_every_draft
+    )
     reject = next(
         ex for ex in REGRESSION_EXAMPLES if ex["inputs"].get("decision") == "reject"
     )

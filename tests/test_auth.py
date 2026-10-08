@@ -10,6 +10,7 @@ that should only be exercisable against a deployment.
 
 import asyncio
 from typing import Any
+from uuid import UUID, uuid5
 
 import pytest
 from langchain.agents.middleware import ToolCallRequest
@@ -17,6 +18,8 @@ from langgraph.runtime import Runtime
 from langgraph_sdk import Auth
 
 from atlas.auth import (
+    _APPROVER_ONLY_IDS,
+    NAMESPACE_GRAPH,
     assistants_are_read_only,
     the_store_is_the_graphs,
     authenticate,
@@ -435,3 +438,63 @@ def test_a_state_write_carrying_empty_metadata_passes_the_hook() -> None:
     value = {"thread_id": "t-1", "metadata": {}}
 
     assert _hook(AGENT_USER, "update", value) == {"owner": "agent-7"}
+
+
+# --- R117: only an approver starts SLA Watch (Chapter 27) ---------------------
+
+SLA_WATCH_UUID = str(uuid5(NAMESPACE_GRAPH, "sla-watch"))
+
+
+def test_the_sla_watch_uuid_is_the_one_the_agent_server_assigns() -> None:
+    """langgraph-api names a graph's default assistant uuid5(NAMESPACE_GRAPH,
+    graph_id); a run reaches the hook with that UUID, not the graph id."""
+    assert NAMESPACE_GRAPH == UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8")
+    assert SLA_WATCH_UUID in _APPROVER_ONLY_IDS
+
+
+@pytest.mark.parametrize("assistant_id", [UUID(SLA_WATCH_UUID), SLA_WATCH_UUID])
+def test_a_non_approver_may_not_start_an_sla_watch_run(assistant_id) -> None:
+    value = {"assistant_id": assistant_id, "kwargs": {"input": {}}}
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        _hook(AGENT_USER, "create_run", value)
+
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "only an approver may run sla-watch"
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("assistant_id", ["sla-watch", SLA_WATCH_UUID])
+def test_a_non_approver_may_not_cron_sla_watch(action: str, assistant_id: str) -> None:
+    ctx = _Ctx(AGENT_USER, action)
+    ctx.resource = "crons"
+    value = {"payload": {"assistant_id": assistant_id, "input": {}}}
+
+    with pytest.raises(Auth.exceptions.HTTPException) as excinfo:
+        asyncio.run(crons_are_scoped_to_their_owner(ctx, value))
+
+    assert excinfo.value.status_code == 403
+
+
+def test_an_approver_may_run_and_cron_sla_watch() -> None:
+    run = {"assistant_id": UUID(SLA_WATCH_UUID), "kwargs": {"input": {}}}
+    cron = {"payload": {"assistant_id": "sla-watch", "input": {}}}
+    ctx = _Ctx(LEAD_USER, "create")
+    ctx.resource = "crons"
+
+    assert _hook(LEAD_USER, "create_run", run) is None
+    assert asyncio.run(crons_are_scoped_to_their_owner(ctx, cron)) is None
+
+
+def test_a_non_approver_may_still_run_and_cron_every_other_graph() -> None:
+    other = str(uuid5(NAMESPACE_GRAPH, "monitor"))
+    ctx = _Ctx(AGENT_USER, "create")
+    ctx.resource = "crons"
+    cron = {"payload": {"assistant_id": "monitor", "input": {"sample_rate": 0.1}}}
+
+    assert _hook(AGENT_USER, "create_run", {"assistant_id": UUID(other)}) == {
+        "owner": "agent-7"
+    }
+    assert asyncio.run(crons_are_scoped_to_their_owner(ctx, cron)) == {
+        "owner": "agent-7"
+    }

@@ -37,6 +37,7 @@ does not exist.
 """
 
 from typing import Any
+from uuid import UUID, uuid5
 
 from langgraph_sdk import Auth
 
@@ -144,6 +145,26 @@ def _plants_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     )
 
 
+# The Agent Server names a graph's default assistant uuid5(NAMESPACE_GRAPH,
+# graph_id) (langgraph-api 0.14.0, langgraph_api/graph.py). A run arrives at
+# the hook with that UUID; a cron's payload still carries what the caller sent.
+NAMESPACE_GRAPH = UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8")
+APPROVER_ONLY_GRAPHS = frozenset({"sla-watch"})
+_APPROVER_ONLY_IDS = APPROVER_ONLY_GRAPHS | {
+    str(uuid5(NAMESPACE_GRAPH, graph_id)) for graph_id in APPROVER_ONLY_GRAPHS
+}
+
+
+def _starts_an_approver_graph(ctx: Auth.types.AuthContext, value: Any) -> bool:
+    """A run or cron on SLA Watch (Chapter 27) from a non-approver. Its
+    drafts claim tickets, and only an approver may act on a check-in, so a
+    run nobody can approve would only hold tickets back from the next scan."""
+    assistant = value.get("assistant_id") or _run_body(value).get("assistant_id")
+    return str(assistant) in _APPROVER_ONLY_IDS and (
+        role_of(ctx.user) not in APPROVER_ROLES
+    )
+
+
 def _writes_state(ctx: Auth.types.AuthContext, value: Any) -> bool:
     """A threads "update" that is a state write, from a non-approver.
 
@@ -190,6 +211,8 @@ def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str] | None:
         raise _refuse("only an approver may send goto or update")  # <1>
     if sends_a_run and _plants_state(ctx, value):
         raise _refuse("only an approver may set graph-owned state")
+    if sends_a_run and _starts_an_approver_graph(ctx, value):
+        raise _refuse("only an approver may run sla-watch")  # <4>
     if ctx.action == "update" and "owner" in (value.get("metadata") or {}):
         raise _refuse("thread ownership is set by the server")  # <2>
     if _writes_state(ctx, value):
@@ -213,6 +236,9 @@ def _owned(ctx: Auth.types.AuthContext, value: Any) -> dict[str, str] | None:
 # 2. Without this, a thread owner could hand a thread to someone else by
 #    patching `metadata.owner`, and the thread would show up in their view.
 # 3. No filter at all. The owner stamp still records who opened the thread.
+# 4. Defense in depth again: SLA Watch's claims lapse after a day
+#    (atlas/sla_watch.py), so even a run that got past this hook could hold
+#    a ticket back for one day, not indefinitely.
 
 
 @auth.on.threads

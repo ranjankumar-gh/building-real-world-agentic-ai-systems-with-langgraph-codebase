@@ -58,8 +58,8 @@ Chapter 21 gets them from `python -m atlas.evals --add-sla-watch-examples`
 name that exists. `run_sla_watch` is `run_atlas`'s dispatch target for those
 examples: it drives `atlas/sla_watch.py`'s `build_sla_watch_graph()` through
 a real interrupt and `Command(resume=...)` - the example's `decision` for
-every draft - and reports the ticket ids the seeded send API actually
-recorded, after resetting it. Reporting from the decisions instead would let
+every draft, echoing the draft's ticket id - and reports the ticket ids the
+seeded send API actually recorded, after resetting it. Reporting from the decisions instead would let
 a `send_checkins` that ignores them pass the reject example."""
 
 from __future__ import annotations
@@ -273,7 +273,10 @@ def run_sla_watch(inputs: dict) -> dict:
         paused = watch.invoke({}, config)
         if "__interrupt__" in paused:
             drafts = paused["__interrupt__"][0].value["drafts"]
-            decisions = [{"type": inputs["decision"]} for _ in drafts]
+            decisions = [
+                {"type": inputs["decision"], "ticket_id": d["ticket_id"]}
+                for d in drafts
+            ]
             watch.invoke(Command(resume=decisions), config)
         sent = [m["ticket_id"] for m in _SLA_TICKETS.sent]
     return {"sla_watch_sent": sent}
