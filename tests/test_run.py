@@ -392,17 +392,27 @@ def _count_lookups(monkeypatch) -> dict[str, int]:
     return calls
 
 
-def test_a_repeat_request_is_answered_from_the_store_without_a_fan_out(monkeypatch):
-    """The chapter's opening, fixed: the June request costs a store read."""
+def test_a_repeat_three_weeks_later_is_answered_from_the_store(monkeypatch):
+    """The chapter's opening, fixed: the first request's entry is aged by
+    three weeks, inside the 30-day window, and the repeat costs a store read."""
+    from datetime import datetime, timedelta, timezone
+
     from langgraph.store.memory import InMemoryStore
+
+    from atlas.research import findings_key, research_ns
 
     calls = _count_lookups(monkeypatch)
     store = InMemoryStore()
     sources = ["docs.internal/refund-policy", "docs.internal/sla"]
     ask = {"store": store, "customer_id": "cust-7", "query": "return policies?"}
 
-    first = run_research(sources, thread_id="research-march", **ask)
-    second = run_research(sources, thread_id="research-june", **ask)
+    first = run_research(sources, thread_id="research-first", **ask)
+    ns, key = research_ns("cust-7"), findings_key("return policies?", sources)
+    aged = dict(store.get(ns, key).value)
+    three_weeks_ago = datetime.now(timezone.utc) - timedelta(weeks=3)
+    aged["recorded_at"] = three_weeks_ago.isoformat()
+    store.put(ns, key, aged)
+    second = run_research(sources, thread_id="research-repeat", **ask)
 
     assert calls == {"docs.internal/refund-policy": 1, "docs.internal/sla": 1}
     assert second["findings"] == first["findings"]
