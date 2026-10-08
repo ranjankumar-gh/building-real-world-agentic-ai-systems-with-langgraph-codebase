@@ -4,10 +4,10 @@ See "The architecture decision record". `ProjectShape` captures the five
 ADR questions as four flags (the fifth - what the team already operates -
 is a non-technical factor the function deliberately does not encode).
 `recommend` checks DURABILITY NEED first, then UNPREDICTABLE BRANCHING,
-as a 2x2 rather than a sequential chain - an earlier draft checked
-branching first and misrouted the durable-but-predictable batch-pipeline
-case (Case 3) to a lighter-weight recommendation than it needed. The
-order of the two checks is the whole point of this module."""
+as a 2x2 rather than a sequential chain. A branching-first chain misroutes
+the durable-but-predictable batch-pipeline case (Case 3) to a
+lighter-weight recommendation than it needs; the order of the two checks
+is the whole point of this module."""
 
 from dataclasses import dataclass
 

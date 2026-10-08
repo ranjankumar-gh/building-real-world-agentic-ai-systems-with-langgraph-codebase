@@ -49,8 +49,8 @@ def test_unpredictable_branching_without_durability_stays_off_the_full_stack():
 
 
 def test_recommend_checks_durability_before_branching():
-    """The bug caught and fixed while drafting this chapter: durability
-    must be checked first. Two shapes that disagree only on
+    """The misroute this ordering prevents: durability must be checked
+    first. Two shapes that disagree only on
     unpredictable_branching, both needing durability, must NOT both fall
     into the "nothing needed" bucket a branching-first chain would give
     the non-branching one."""
