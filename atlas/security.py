@@ -71,7 +71,12 @@ def graph_store(runtime: Runtime | None, fallback: BaseStore | None) -> BaseStor
 
 
 ROLE_TOOL_PERMISSIONS: dict[str, set[str]] = {
-    "support_agent": {"search_kb", "lookup_ticket", "set_ticket_status"},
+    "support_agent": {
+        "search_kb",
+        "lookup_ticket",
+        "set_ticket_status",
+        "service_status",  # Chapter 7's MCP tool: read-only
+    },
     "support_lead": {"search_kb", "lookup_ticket", "set_ticket_status"},
     "support_readonly": {"search_kb", "lookup_ticket"},  # <1>
 }
@@ -121,6 +126,10 @@ class RoleAuthorityGate(AgentMiddleware):
 #    `update_ticket` tool - a role can be granted read access without anyone
 #    having to reason about which fields of a combined tool are safe for that
 #    role to touch.
+#    `support_agent` also holds `service_status`, the read-only tool Chapter
+#    7 loads over MCP, so an MCP result has a role that can ask for it and
+#    reaches `InjectionGuard` on its way back. A tool the map does not name
+#    is refused for every role, MCP tools included.
 
 
 # --- Injection surface: scan untrusted content, then tag it. ---------------

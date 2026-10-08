@@ -48,12 +48,24 @@ def _request(name: str, args: dict, role: str | None = None) -> ToolCallRequest:
 # --- RoleAuthorityGate -------------------------------------------------
 
 
-def test_role_permissions_grant_support_agent_the_full_ticket_toolset():
+def test_role_permissions_grant_support_agent_the_ticket_tools_and_mcp_status():
     assert ROLE_TOOL_PERMISSIONS["support_agent"] == {
         "search_kb",
         "lookup_ticket",
         "set_ticket_status",
+        "service_status",
     }
+
+
+def test_only_support_agent_may_call_the_mcp_status_tool():
+    """Chapter 7's MCP tool is granted to one role; every other role, and a
+    role the map does not name, is refused it by default."""
+    holders = {
+        role
+        for role, tools in ROLE_TOOL_PERMISSIONS.items()
+        if "service_status" in tools
+    }
+    assert holders == {"support_agent"}
 
 
 def test_role_permissions_keep_support_readonly_off_the_write_tool():
