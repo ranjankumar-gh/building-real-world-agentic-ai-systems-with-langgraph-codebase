@@ -6,7 +6,8 @@ chapter (stateless FAQ bot, Atlas-shaped durable agent, LLM-assisted
 batch pipeline) are reproduced directly as tests, plus the two
 "deserves its own branch" edge cases the 2x2 shape exists to get right:
 a project needing durability without unpredictable branching (Case 3 -
-the one a sequential branching-first check misroutes), and a project
+the one a chain that answers after the branching check alone misroutes),
+and a project
 needing unpredictable branching without durability."""
 
 from atlas.stack_decision import ProjectShape, recommend
@@ -30,7 +31,7 @@ def test_case_2_atlas_shaped_durable_agent_earns_the_durability_tax():
 
 
 def test_case_3_batch_pipeline_is_durable_but_not_unpredictable():
-    """The tell a sequential "check branching first" chain gets wrong:
+    """The tell a chain that answers after one question gets wrong:
     durability needed, branching predictable, is a different problem
     (durable execution of known steps) than the FAQ bot's "needs
     nothing" case - not a smaller version of it."""
@@ -48,12 +49,13 @@ def test_unpredictable_branching_without_durability_stays_off_the_full_stack():
     assert recommend(shape) == "LangGraph without a checkpointer, or a lighter agent library"
 
 
-def test_recommend_checks_durability_before_branching():
-    """The misroute this ordering prevents: durability must be checked
-    first. Two shapes that disagree only on
-    unpredictable_branching, both needing durability, must NOT both fall
-    into the "nothing needed" bucket a branching-first chain would give
-    the non-branching one."""
+def test_recommend_asks_both_questions_before_answering():
+    """The misroute the 2x2 prevents: a chain that returns after the
+    branching question alone. Which question is asked first does not
+    matter; answering before both are asked does. Two shapes that disagree
+    only on unpredictable_branching, both needing durability, must NOT
+    fall into the "nothing needed" bucket that early return would give the
+    non-branching one."""
     durable_predictable = ProjectShape(survives_restart=True, unpredictable_branching=False)
     durable_unpredictable = ProjectShape(survives_restart=True, unpredictable_branching=True)
 
