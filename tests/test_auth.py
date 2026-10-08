@@ -498,3 +498,34 @@ def test_a_non_approver_may_still_run_and_cron_every_other_graph() -> None:
     assert asyncio.run(crons_are_scoped_to_their_owner(ctx, cron)) == {
         "owner": "agent-7"
     }
+
+
+# --- R123: the assistant id is compared in canonical UUID form ----------------
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        SLA_WATCH_UUID.upper(),
+        "{" + SLA_WATCH_UUID + "}",
+        SLA_WATCH_UUID.replace("-", ""),
+        "urn:uuid:" + SLA_WATCH_UUID,
+    ],
+)
+def test_another_spelling_of_the_sla_watch_uuid_is_refused_too(spelling: str) -> None:
+    run = {"assistant_id": spelling, "kwargs": {"input": {}}}
+    cron = {"payload": {"assistant_id": spelling, "input": {}}}
+    ctx = _Ctx(AGENT_USER, "create")
+    ctx.resource = "crons"
+
+    with pytest.raises(Auth.exceptions.HTTPException):
+        _hook(AGENT_USER, "create_run", run)
+    with pytest.raises(Auth.exceptions.HTTPException):
+        asyncio.run(crons_are_scoped_to_their_owner(ctx, cron))
+
+
+@pytest.mark.parametrize("assistant_id", ["monitor", "not-a-uuid", "", None, 42])
+def test_a_value_that_is_not_a_uuid_is_compared_as_given(assistant_id) -> None:
+    assert _hook(AGENT_USER, "create_run", {"assistant_id": assistant_id}) == {
+        "owner": "agent-7"
+    }

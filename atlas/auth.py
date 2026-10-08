@@ -155,12 +155,25 @@ _APPROVER_ONLY_IDS = APPROVER_ONLY_GRAPHS | {
 }
 
 
+def _canonical(assistant: Any) -> str:
+    """A UUID in its one canonical spelling; any other value as given."""
+    try:
+        return str(UUID(str(assistant)))
+    except ValueError:
+        return str(assistant)
+
+
 def _starts_an_approver_graph(ctx: Auth.types.AuthContext, value: Any) -> bool:
     """A run or cron on SLA Watch (Chapter 27) from a non-approver. Its
     drafts claim tickets, and only an approver may act on a check-in, so a
-    run nobody can approve would only hold tickets back from the next scan."""
+    run nobody can approve would only hold tickets back from the next scan.
+
+    Keyed on assistant ids, not graph ids: neither a run's nor a cron's
+    request names its graph, so an extra assistant on the sla-watch graph
+    is not caught here. Callers cannot create one (assistants are
+    read-only to them); the in-graph checks still refuse any send."""
     assistant = value.get("assistant_id") or _run_body(value).get("assistant_id")
-    return str(assistant) in _APPROVER_ONLY_IDS and (
+    return _canonical(assistant) in _APPROVER_ONLY_IDS and (
         role_of(ctx.user) not in APPROVER_ROLES
     )
 
