@@ -566,7 +566,7 @@ def test_run_and_reflect_returns_first_and_the_next_thread_recalls_the_fact(
 def test_run_and_reflect_keeps_the_reply_when_the_ticket_names_no_customer(
     monkeypatch,
 ):
-    """G3: a turn with no ticket, or a ticket without customer_id, still
+    """A turn with no ticket, or a ticket without customer_id, still
     returns the reply the graph produced and submits no reflection."""
     from atlas import run as run_module
 

@@ -316,7 +316,7 @@ def test_answer_composes_from_retrieved_as_retrieve_left_it(monkeypatch):
 
 
 def test_an_article_larger_than_the_slice_retries_then_escalates(monkeypatch):
-    """Chapter 12, C2: a single article bigger than the whole retrieved slice
+    """Chapter 12: a single article bigger than the whole retrieved slice
     is dropped by `select_docs` in `retrieve`, so the list
     `route_after_retrieve` reads is empty. That is Chapter 6's "nothing
     usable" path: retry up to the cap, then escalate. The run never reaches
@@ -349,7 +349,7 @@ def test_an_article_larger_than_the_slice_retries_then_escalates(monkeypatch):
 def test_triage_hands_classify_the_history_slice_and_state_keeps_every_turn(
     monkeypatch,
 ):
-    """Chapter 12, C1: the graph's own model call is bounded. A thread far
+    """Chapter 12: the graph's own model call is bounded. A thread far
     longer than BUDGET.history reaches `classify` trimmed to the slice,
     starting on a human turn, and ending on the newest question; the stored
     history is untouched."""

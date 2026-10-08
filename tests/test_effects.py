@@ -145,7 +145,7 @@ def test_refund_refused_is_outside_the_refund_nodes_retry_on():
 
 
 def test_the_cap_counts_what_the_ticket_was_already_refunded():
-    """R106: the key is per thread, so two threads refunding one ticket
+    """Chapter 10: the key is per thread, so two threads refunding one ticket
     reach the provider as two refunds. Never more than paid, in total."""
     from atlas import effects
 

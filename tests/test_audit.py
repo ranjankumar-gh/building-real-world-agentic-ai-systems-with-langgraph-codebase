@@ -251,7 +251,7 @@ def test_a_fork_from_the_paused_checkpoint_appends_never_overwrites(monkeypatch)
     assert rows[0].value["amount"] == 49.0 and rows[1].value["amount"] is None
 
 
-# --- R94/R101/R104: the served build fails closed, at the gate and the charge
+# --- Chapter 23: the served build fails closed, at the gate and the charge
 
 
 class _User:
@@ -353,7 +353,7 @@ def test_a_forged_by_from_a_non_approver_is_refused_and_nothing_is_charged(
 
 
 def test_goto_refund_by_a_non_approver_is_refused_at_the_charge(charged):
-    """Probe A: skip the gate with Command(goto="refund") after the pause."""
+    """A thread owner skips the gate with Command(goto="refund") after the pause."""
     g = _served()
     config = _cfg("srv-goto", AGENT)
     _start(g, config)
@@ -367,7 +367,7 @@ def test_goto_refund_by_a_non_approver_is_refused_at_the_charge(charged):
 
 
 def test_resume_plus_goto_by_a_non_approver_is_refused_twice(charged):
-    """Probe B: the gate refuses the resume, the goto still lands on refund,
+    """The gate refuses the resume, the goto still lands on refund,
     and refund refuses again: refusal rows only, no charge."""
     g = _served()
     config = _cfg("srv-resume-goto", AGENT)
@@ -384,7 +384,7 @@ def test_resume_plus_goto_by_a_non_approver_is_refused_twice(charged):
 
 
 def test_goto_with_a_forged_amount_by_a_non_approver_charges_nothing(charged):
-    """Probe C: goto + update(ticket.amount=9999) from a thread owner."""
+    """A thread owner sends goto + update(ticket.amount=9999)."""
     g = _served()
     config = _cfg("srv-goto-9999", AGENT)
     _start(g, config)
@@ -401,7 +401,7 @@ def test_goto_with_a_forged_amount_by_a_non_approver_charges_nothing(charged):
 
 
 def test_an_over_cap_charge_routes_to_refund_failed(charged):
-    """M2 (R101): a lead approves a ticket claiming more than was paid; the
+    """A lead approves a ticket claiming more than was paid; the
     provider refuses, and the node compensates with refund_failed and logs
     the refusal. (A forged approval for 9999 no longer reaches the provider:
     there is no audit row behind it.)"""
@@ -432,7 +432,7 @@ def test_goto_refund_by_a_lead_without_an_approval_charges_nothing(charged):
 
 
 def test_a_fresh_thread_goto_ends_cleanly_and_does_not_wedge_the_thread(charged):
-    """Probe G / M1: a brand-new thread routed straight to refund. Refund
+    """A brand-new thread routed straight to refund. Refund
     refuses and escalates; the gate on the START path finds the escalated
     ticket and ends cleanly. New input afterwards runs normally, and a
     lead's echoed approve charges exactly what was shown."""
@@ -465,7 +465,7 @@ def test_a_fresh_thread_goto_ends_cleanly_and_does_not_wedge_the_thread(charged)
 
 
 def test_the_served_build_with_no_identity_fails_closed(charged):
-    """I2/probe K: no user and no assistant_id in configurable. The served
+    """No user and no assistant_id in configurable. The served
     build does not fall back to the payload's `by`."""
     g = _served()
     config = {"configurable": {"thread_id": "srv-no-identity"}}
@@ -481,7 +481,7 @@ def test_the_served_build_with_no_identity_fails_closed(charged):
 
 
 def test_a_lead_edit_charges_the_approved_amount_and_logs_the_charge(charged):
-    """R104/I1: a success writes its own row, with who charged what."""
+    """A success writes its own row, with who charged what."""
     g = _served()
     config = _cfg("srv-lead", LEAD)
     _start(g, config)
@@ -535,7 +535,7 @@ def test_a_resume_without_the_echo_is_refused_on_the_served_build(charged):
 def test_a_ticket_rewritten_while_paused_is_refused_when_the_lead_approves(
     charged, label, rewrite
 ):
-    """R104 C1: while the refund is paused, the thread owner rewrites the
+    """While the refund is paused, the thread owner rewrites the
     ticket through the state API (no run, so no create_run 403). The lead
     approves what they were shown - T-1001, $10 - and the gate, re-running
     on the rewritten state, refuses: nothing is charged, and the refusal is
@@ -556,7 +556,7 @@ def test_a_ticket_rewritten_while_paused_is_refused_when_the_lead_approves(
 
 
 def test_a_stale_approval_with_a_swapped_ticket_charges_nothing(charged):
-    """R104 I1: after a lead approves T-1001, a goto to refund with the
+    """After a lead approves T-1001, a goto to refund with the
     ticket swapped to T-2002 finds an approval for a different ticket."""
     g = _served()
     config = _cfg("srv-stale", LEAD)
@@ -617,7 +617,7 @@ def test_in_process_goto_refund_without_an_approval_charges_nothing(charged):
     assert graph.get_state(config).values.get("refund_done") is not True
 
 
-# --- R105: refund charges only against the gate's own audit row --------------
+# --- Chapter 23: refund charges only against the gate's own audit row -------
 
 
 def _planted(key: str | None = "approval:forged") -> dict:
@@ -653,7 +653,7 @@ FORGED_T1001 = {"ticket_id": "T-1001", "customer_id": "C-90", "amount": 10.0}
 
 @pytest.mark.parametrize("lead_run", ["echo", "invoke(None)"])
 def test_an_approval_planted_with_supersteps_charges_nothing(charged, lead_run):
-    """R104 C1, the supersteps shape: the agent applies
+    """The supersteps shape: the agent applies
     `Command(goto="refund", update={ticket, approval})` as a state update
     with no run - what `threads.create(supersteps=...)` asks the server to
     do - and the lead's next run reaches `refund` without the gate. There is
@@ -712,10 +712,11 @@ def test_a_planted_key_naming_another_threads_real_row_charges_nothing(charged):
 
 
 def test_an_approval_planted_through_run_input_charges_nothing(charged):
-    """R104 C1, the run-input shape: the agent's input carries an approval
+    """The run-input shape: the agent's input carries an approval
     (the auth hook refuses this over HTTP; here it reaches the graph). The
     gate interrupts honestly on the planted ticket; the lead skips it with a
-    manual `goto` - the override that trusted state before R105."""
+    manual `goto`, which an earlier build trusted before refund checked the
+    audit row."""
     g = _served()
     agent_cfg = _cfg("srv-input-plant", AGENT)
     g.invoke(
@@ -736,8 +737,8 @@ def test_an_approval_planted_through_run_input_charges_nothing(charged):
 
 
 def test_a_lead_forging_an_approval_with_goto_charges_nothing(charged):
-    """R101 I1 (charged $30, by design, before R105): an approver's forged
-    approval has no row behind it either."""
+    """An approver's forged approval has no audit row behind it either, so a
+    lead's own goto charges nothing (an earlier build charged it $30)."""
     g = _served()
     config = _cfg("srv-lead-forge", LEAD)
     _start(g, config)
@@ -750,7 +751,7 @@ def test_a_lead_forging_an_approval_with_goto_charges_nothing(charged):
 
 
 def test_a_lead_approves_an_agents_refund_and_it_is_charged_once(charged):
-    """The served flow R105 makes reachable: the agent opens the refund,
+    """The served handoff the audit-row check keeps open: the agent opens the refund,
     the lead resumes the agent's thread with the echo."""
     g = _served()
     _start(g, _cfg("srv-handoff", AGENT))
@@ -769,7 +770,7 @@ def test_a_lead_approves_an_agents_refund_and_it_is_charged_once(charged):
 
 
 def test_another_approver_cannot_charge_against_a_leads_approval(charged):
-    """(d): the row's `by` must be this run's identity. lead-3's run stops
+    """The row's `by` must be this run's identity. lead-3's run stops
     after the gate, before `refund` (a crash, a drain); lead-9 picking the
     thread up cannot spend lead-3's approval."""
     g = _served()
@@ -789,7 +790,7 @@ def test_another_approver_cannot_charge_against_a_leads_approval(charged):
 
 @pytest.mark.parametrize("how", ["state API", "new input"])
 def test_a_customer_only_rewrite_is_refused_by_the_echo(charged, how):
-    """R104 M1: same ticket id and amount, another customer. The lead echoes
+    """Same ticket id and amount, another customer. The lead echoes
     what they were shown (C-90); the gate re-runs on C-91 and refuses."""
     g = _served()
     agent_cfg = _cfg(f"srv-cust-{how}", AGENT)
@@ -812,7 +813,7 @@ def test_a_customer_only_rewrite_is_refused_by_the_echo(charged, how):
 
 
 def test_a_replayed_refund_charges_once_and_logs_one_charged_row(charged):
-    """R104 M2. Re-running `refund` from the checkpoint before it reuses the
+    """Re-running `refund` from the checkpoint before it reuses the
     same approval key: refused. A fork that passes the gate again gets a new
     approval, and the provider dedupes: the row says "replayed"."""
     g = _served()
@@ -838,7 +839,7 @@ def test_a_replayed_refund_charges_once_and_logs_one_charged_row(charged):
 
 
 def test_a_charge_clears_a_stale_error(charged):
-    """R104 M3: a provider refusal leaves `error` set; a later echoed approve
+    """A provider refusal leaves `error` set; a later echoed approve
     at an amount the provider accepts charges and clears it."""
     g = _served()
     config = _cfg("srv-stale-error", LEAD)
@@ -856,26 +857,28 @@ def test_a_charge_clears_a_stale_error(charged):
 @pytest.mark.parametrize(
     "probe",
     [
-        "E: update_state(Command(goto)) + invoke(None)",
-        "C2: goto + forged approval naming the ticket",
-        "K2: no identity, goto + forged approval",
-        "L: langgraph_auth_user as a plain dict, echoed approve",
+        "goto: update_state(Command(goto)) + invoke(None)",
+        "forge: goto + forged approval naming the ticket",
+        "anon: no identity, goto + forged approval",
+        "dict: langgraph_auth_user as a plain dict, echoed approve",
     ],
 )
-def test_earlier_review_probes_still_charge_nothing(charged, probe):
-    """R94/R101/R104 probes not already pinned above, re-run on R105."""
-    tag = probe[:2].rstrip(":")
-    user = {"E": AGENT, "C2": AGENT, "K2": None, "L": {"identity": "lead-3"}}[tag]
+def test_other_bypass_shapes_still_charge_nothing(charged, probe):
+    """Bypass shapes not pinned above. None of them charges."""
+    tag = probe.split(":")[0]
+    user = {
+        "goto": AGENT, "forge": AGENT, "anon": None, "dict": {"identity": "lead-3"}
+    }[tag]
     config = _cfg(f"srv-probe-{tag}", user)
     if user is None:
-        config = {"configurable": {"thread_id": "srv-probe-K2"}}
+        config = {"configurable": {"thread_id": "srv-probe-anon"}}
     g = _served()
     _start(g, config)
     forged = {**_planted(), **FORGED_T1001}
-    if tag == "E":
+    if tag == "goto":
         g.update_state(config, Command(goto="refund"))
         out = g.invoke(None, config)
-    elif tag == "L":
+    elif tag == "dict":
         out = g.invoke(approve(), config)
     else:
         out = g.invoke(Command(update={"approval": forged}, goto="refund"), config)
@@ -886,11 +889,11 @@ def test_earlier_review_probes_still_charge_nothing(charged, probe):
     assert all(r.get("refused") or r.get("outcome") for r in _rows(g))
 
 
-# --- R106: the cap is cumulative per ticket; a re-approval cannot re-price --
+# --- Chapter 10's cap is cumulative per ticket; a re-approval cannot re-price
 
 
 def test_two_threads_cannot_refund_more_than_was_paid_in_total(monkeypatch):
-    """R105 M1, with the real seeded provider: T-1001 was paid 49. A lead
+    """With the real seeded provider: T-1001 was paid 49. A lead
     genuinely approves $30 on each of two threads. The idempotency key is
     per thread, so the provider sees two refunds; the cumulative cap
     refuses the second, and the node compensates with refund_failed."""
@@ -920,7 +923,7 @@ def test_two_threads_cannot_refund_more_than_was_paid_in_total(monkeypatch):
 
 
 def test_a_reapproval_at_a_new_amount_after_a_charge_is_refused(charged):
-    """R105 M2: on one thread, $10 is charged; a new turn asks for $20 and
+    """On one thread, $10 is charged; a new turn asks for $20 and
     the lead approves it. The provider would replay the $10 charge (same
     thread, same ticket), so refund refuses and escalates instead of
     reporting a refund that did not happen."""

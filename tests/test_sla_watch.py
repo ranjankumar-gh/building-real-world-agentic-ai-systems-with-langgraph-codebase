@@ -761,7 +761,7 @@ def test_a_lead_starts_and_an_agent_resumes():
 
 @pytest.mark.parametrize("resumer", [AGENT, LEAD])
 def test_a_state_write_as_the_gate_sends_nothing_on_the_served_build(resumer):
-    """The R117 bypass: agent-7 writes a draft and an approval into state as
+    """The state-write bypass: agent-7 writes a draft and an approval into state as
     if the gate had produced them, then runs the graph on. Whoever runs it,
     nothing is sent, because no gate row stands behind the decision, and
     the attempt is itself an audit row."""

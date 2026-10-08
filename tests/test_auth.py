@@ -222,7 +222,7 @@ def test_crons_are_allowed_for_their_owner_not_refused_by_default_deny() -> None
     assert value["metadata"]["owner"] == "agent-7"
 
 
-# --- R101: a run that steers the graph needs an approver ---------------------
+# --- Chapter 23: a run that steers the graph needs an approver ---------------
 
 
 @pytest.mark.parametrize(
@@ -253,7 +253,7 @@ def test_a_resume_only_command_and_a_lead_steering_are_allowed() -> None:
 
 
 def test_a_non_approver_may_not_write_thread_state() -> None:
-    """R104: the state API is a write path that is not a run. The hook sees
+    """The state API is a write path that is not a run. The hook sees
     only the thread id for a state write, so a non-approver's is refused."""
     ctx = _Ctx(_User("agent-7", ["role:support_agent"]), "update")
 
@@ -278,7 +278,7 @@ def test_a_metadata_patch_a_cancel_and_a_lead_state_write_are_allowed() -> None:
     assert asyncio.run(lead_write) is None
 
 
-# --- R105: ownership is the server's; approvers reach every thread ------------
+# --- Ownership is the server's; approvers reach every thread -----------------
 
 AGENT_USER = _User("agent-7", ["role:support_agent"])
 LEAD_USER = _User("lead-3", ["role:support_lead"])
@@ -290,7 +290,7 @@ def _hook(user: _User, action: str, value: dict[str, Any]) -> Any:
 
 @pytest.mark.parametrize("user", [AGENT_USER, LEAD_USER], ids=["agent", "lead"])
 def test_no_caller_may_rewrite_a_threads_owner(user: _User) -> None:
-    """R104 I1: an agent handing its thread to a lead by patching
+    """An agent handing its thread to a lead by patching
     metadata.owner. Refused for every caller, approvers included."""
     value = {"thread_id": "t-1", "metadata": {"owner": "lead-3"}}
 
@@ -363,7 +363,7 @@ def test_a_non_approver_may_not_create_a_thread_with_supersteps() -> None:
     assert excinfo.value.status_code == 403
 
 
-# --- R105: the HTTP store API cannot reach the audit log ----------------------
+# --- The HTTP store API cannot reach the audit log ---------------------------
 
 
 def _store(user: _User, action: str, namespace: tuple | None) -> Any:
@@ -396,7 +396,7 @@ def test_a_customer_namespace_needs_an_explicit_grant() -> None:
     assert _store(LEAD_USER, "get", ("containment", "agent-7")) is False
 
 
-# --- R106: a cron's payload is a run too; the metadata-shape gap ---------------
+# --- A cron's payload is a run too; the metadata-shape gap -------------------
 
 
 @pytest.mark.parametrize("action", ["create", "update"])
@@ -440,7 +440,7 @@ def test_a_state_write_carrying_empty_metadata_passes_the_hook() -> None:
     assert _hook(AGENT_USER, "update", value) == {"owner": "agent-7"}
 
 
-# --- R117: only an approver starts SLA Watch (Chapter 27) ---------------------
+# --- Chapter 27: only an approver starts SLA Watch ---------------------------
 
 SLA_WATCH_UUID = str(uuid5(NAMESPACE_GRAPH, "sla-watch"))
 
@@ -500,7 +500,7 @@ def test_a_non_approver_may_still_run_and_cron_every_other_graph() -> None:
     }
 
 
-# --- R123: the assistant id is compared in canonical UUID form ----------------
+# --- The assistant id is compared in canonical UUID form ---------------------
 
 
 @pytest.mark.parametrize(

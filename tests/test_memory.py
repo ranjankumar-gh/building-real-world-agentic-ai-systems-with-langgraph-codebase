@@ -373,11 +373,11 @@ def test_reflect_extracts_then_compacts(monkeypatch):
 def test_reflect_numbers_the_messages_and_the_check_uses_those_numbers(
     monkeypatch,
 ):
-    """G4: the extractor sees each message prefixed with its [n] number, so
+    """The extractor sees each message prefixed with its [n] number, so
     source_turn names a visible index rather than a position the model has
-    to count. R76: each line also names who wrote it ("customer" or
-    "Atlas"), matching the chapter's extraction figure. This stand-in extractor cites whatever number it sees in front
-    of each line: the customer's preference survives, and the fact lifted
+    to count. Each line also names who wrote it ("customer" or "Atlas"),
+    matching the chapter's extraction figure. This stand-in extractor cites
+    whatever number it sees in front of each line: the customer's preference survives, and the fact lifted
     from Atlas's reply is dropped."""
     seen = {}
 
