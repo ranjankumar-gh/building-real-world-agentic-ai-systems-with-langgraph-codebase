@@ -46,6 +46,8 @@ from atlas.evals import (
     ALL_EVALUATORS,
     ONLINE_CORRECTNESS_PROMPT,
     REGRESSION_EXAMPLES,
+    SLA_WATCH_EXAMPLES,
+    add_examples,
     answer_quality,
     build_regression_dataset,
     checkins_sent_only_if_approved,
@@ -384,6 +386,84 @@ def test_run_atlas_dispatches_sla_watch_targets_without_a_message_field():
     run_sla_watch BEFORE it ever reads inputs["message"]."""
     result = run_atlas({"target": "sla_watch", "decision": "approve"})
     assert result == {"sla_watch_sent": ["T-2001"]}
+
+
+def test_run_sla_watch_reports_what_was_sent_so_the_pitfall_fails_the_eval(
+    monkeypatch,
+):
+    """The capstone's pitfall planted: a `send_checkins` that sends every
+    draft whatever the decision. The reject example must fail. Reporting
+    from the decisions, as the target once did, let it pass."""
+    import atlas.sla_watch as sla_watch_module
+    from atlas.tools import send_checkin
+
+    def send_every_draft(state, runtime) -> dict:
+        for draft in state["drafts"]:
+            send_checkin.invoke(
+                {
+                    "key": sla_watch_module.checkin_key(draft["ticket_id"]),
+                    "ticket_id": draft["ticket_id"],
+                    "message": draft["message"],
+                }
+            )
+        return {}
+
+    monkeypatch.setattr(sla_watch_module, "send_checkins", send_every_draft)
+    reject = next(
+        ex for ex in REGRESSION_EXAMPLES if ex["inputs"].get("decision") == "reject"
+    )
+
+    outputs = run_sla_watch(reject["inputs"])
+
+    assert outputs == {"sla_watch_sent": ["T-2001"]}
+    assert checkins_sent_only_if_approved(outputs, reject["outputs"]) is False
+
+
+def test_run_sla_watch_starts_from_a_clean_send_record_every_time():
+    """The seeded ledger is process-global and idempotent by key, so a second
+    approve run in the same process would otherwise send nothing new."""
+    first = run_sla_watch({"target": "sla_watch", "decision": "approve"})
+    second = run_sla_watch({"target": "sla_watch", "decision": "approve"})
+
+    assert first == second == {"sla_watch_sent": ["T-2001"]}
+
+
+def test_all_evaluators_end_with_sla_watchs_own_check():
+    assert len(ALL_EVALUATORS) == 5
+    assert ALL_EVALUATORS[-1] is checkins_sent_only_if_approved
+
+
+class _FakeDatasetClient:
+    def __init__(self, existing: list[dict]) -> None:
+        self.existing = existing
+        self.created: list[dict] = []
+
+    def list_examples(self, dataset_name: str):
+        assert dataset_name == "atlas-regression"
+        return [SimpleNamespace(inputs=ex["inputs"]) for ex in self.existing]
+
+    def create_examples(self, dataset_name: str, examples: list[dict]) -> None:
+        assert dataset_name == "atlas-regression"
+        self.created.extend(examples)
+
+
+def test_add_examples_adds_sla_watch_to_an_existing_dataset(monkeypatch):
+    """A reader who created `atlas-regression` in Chapter 21 cannot create it
+    again; `add_examples` adds the two examples to the dataset that exists."""
+    chapter_21 = REGRESSION_EXAMPLES[: -len(SLA_WATCH_EXAMPLES)]
+    fake = _FakeDatasetClient(existing=chapter_21)
+    monkeypatch.setattr(evals_module, "client", fake)
+
+    assert add_examples(SLA_WATCH_EXAMPLES) == 2
+    assert fake.created == SLA_WATCH_EXAMPLES
+
+
+def test_add_examples_skips_examples_already_in_the_dataset(monkeypatch):
+    fake = _FakeDatasetClient(existing=REGRESSION_EXAMPLES)
+    monkeypatch.setattr(evals_module, "client", fake)
+
+    assert add_examples(SLA_WATCH_EXAMPLES) == 0
+    assert fake.created == []
 
 
 # --- run_atlas: research examples on the real supervisor graph -------------

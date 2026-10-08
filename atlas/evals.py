@@ -50,18 +50,22 @@ blocks a merge on.
 
 Chapter 27, "Capstone", adds `checkins_sent_only_if_approved` - SLA Watch's
 own deterministic evaluator, following the same no-op-if-not-applicable
-shape as `routing_correct`/`handoffs_within_bound` - plus two new examples
-(`target: "sla_watch"`) in the SAME frozen `atlas-regression` dataset, not a
-parallel suite. `run_sla_watch` is `run_atlas`'s dispatch target for those
-two examples: it drives `atlas/sla_watch.py`'s `build_sla_watch_graph()`
-through a REAL suspend-at-`approval_gate`/resume-with-`Command(resume=...)`
-cycle - the example's own `decision` field becomes every draft's decision -
-and reports which ticket ids actually got a `send_checkin` call, the exact
-field `checkins_sent_only_if_approved` checks against the reference."""
+shape as `routing_correct`/`handoffs_within_bound` - and two examples,
+`SLA_WATCH_EXAMPLES` (`target: "sla_watch"`), in the SAME frozen
+`atlas-regression` dataset, not a parallel suite. A dataset created in
+Chapter 21 gets them from `python -m atlas.evals --add-sla-watch-examples`
+(`add_examples`, which skips any already there); `create_dataset` refuses a
+name that exists. `run_sla_watch` is `run_atlas`'s dispatch target for those
+examples: it drives `atlas/sla_watch.py`'s `build_sla_watch_graph()` through
+a real interrupt and `Command(resume=...)` - the example's `decision` for
+every draft - and reports the ticket ids the seeded send API actually
+recorded, after resetting it. Reporting from the decisions instead would let
+a `send_checkins` that ignores them pass the reject example."""
 
 from __future__ import annotations
 
 import sys
+import threading
 import uuid
 from collections.abc import Iterable
 
@@ -76,9 +80,10 @@ from atlas.research import supervisor_graph
 from atlas.resolve import build_resolved_graph
 from atlas.security import AtlasContext
 from atlas.sla_watch import build_sla_watch_graph
-from atlas.tools import text_of
+from atlas.tools import _SLA_TICKETS, text_of
 
 REGRESSION_DATASET = "atlas-regression"
+_SLA_EVAL_LOCK = threading.Lock()
 
 # One example per known Atlas ROUTE - path coverage, not question variety.
 # See "Building a path-coverage dataset".
@@ -122,8 +127,11 @@ REGRESSION_EXAMPLES = [
         },
         "outputs": {"max_handoffs": 2},
     },
-    # Chapter 27: SLA Watch's two paths - approve sends, reject doesn't. No
-    # "message" field - SLA Watch runs on a schedule, not a customer turn.
+]
+
+# Chapter 27: SLA Watch's two paths - approve sends, reject doesn't. No
+# "message" field - SLA Watch runs on a schedule, not a customer turn.
+SLA_WATCH_EXAMPLES = [
     {
         "inputs": {"target": "sla_watch", "decision": "approve"},
         "outputs": {"sla_watch_sent": ["T-2001"]},
@@ -133,6 +141,7 @@ REGRESSION_EXAMPLES = [
         "outputs": {"sla_watch_sent": []},
     },
 ]
+REGRESSION_EXAMPLES += SLA_WATCH_EXAMPLES
 
 client = Client()  # no API key needed to build; its background thread fetches /info
 
@@ -146,6 +155,19 @@ def build_regression_dataset(
         description="One example per known Atlas route - path coverage, not questions.",
     )
     client.create_examples(dataset_id=dataset.id, examples=REGRESSION_EXAMPLES)
+
+
+def add_examples(
+    examples: list[dict], dataset_name: str = REGRESSION_DATASET
+) -> int:
+    """Add a new route's examples to the existing frozen dataset, skipping
+    any already there. Adding a route is the one edit a frozen dataset
+    takes; editing an example to make it pass is not."""
+    present = [ex.inputs for ex in client.list_examples(dataset_name=dataset_name)]
+    new = [ex for ex in examples if ex["inputs"] not in present]
+    if new:
+        client.create_examples(dataset_name=dataset_name, examples=new)
+    return len(new)
 
 
 def routing_correct(inputs: dict, outputs: dict, reference_outputs: dict) -> bool:
@@ -240,24 +262,20 @@ def checkins_sent_only_if_approved(outputs: dict, reference_outputs: dict) -> bo
 
 
 def run_sla_watch(inputs: dict) -> dict:
-    """Chapter 27: drive one SLA Watch dataset example through a REAL
-    suspend-at-`approval_gate`/resume-with-`Command(resume=...)` cycle -
-    every drafted check-in gets the example's own `decision` - and report
-    which ticket ids actually received a `send_checkin` call, the field
-    `checkins_sent_only_if_approved` checks. A fresh graph (fresh
-    checkpointer AND fresh store) per call, the same example-isolation
-    discipline `run_atlas`'s fresh `thread_id` already applies below."""
-    config = {"configurable": {"thread_id": f"eval-{uuid.uuid4()}"}}
-    watch_graph = build_sla_watch_graph()
-    watch_graph.invoke({}, config)  # suspends at approval_gate
-    n_drafts = len(watch_graph.get_state(config).values.get("drafts", []))
-    decisions = [{"type": inputs["decision"]}] * n_drafts
-    result = watch_graph.invoke(Command(resume=decisions), config)
-    sent = [
-        draft["ticket_id"]
-        for draft, decision in zip(result["drafts"], result["decisions"])
-        if decision["type"] != "reject"
-    ]
+    """Chapter 27: one SLA Watch example through a real interrupt and
+    resume, every draft getting the example's `decision`. Reports what the
+    seeded send API actually sent, not what the decisions say should
+    have."""
+    with _SLA_EVAL_LOCK:  # the send record is process-global
+        _SLA_TICKETS.reset()
+        config = {"configurable": {"thread_id": f"eval-{uuid.uuid4()}"}}
+        watch = build_sla_watch_graph()
+        paused = watch.invoke({}, config)
+        if "__interrupt__" in paused:
+            drafts = paused["__interrupt__"][0].value["drafts"]
+            decisions = [{"type": inputs["decision"]} for _ in drafts]
+            watch.invoke(Command(resume=decisions), config)
+        sent = [m["ticket_id"] for m in _SLA_TICKETS.sent]
     return {"sla_watch_sent": sent}
 
 
@@ -323,5 +341,7 @@ def gate(results: Iterable[dict]) -> int:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--create-dataset"]:
         build_regression_dataset()
+    elif sys.argv[1:] == ["--add-sla-watch-examples"]:  # Chapter 27
+        print(f"added {add_examples(SLA_WATCH_EXAMPLES)} examples")
     else:
         raise SystemExit(gate(run_regression_suite()))
