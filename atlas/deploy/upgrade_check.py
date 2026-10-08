@@ -35,7 +35,7 @@ def check_candidate_upgrade(package: str, candidate_version: str) -> bool:
     """Run the SAME regression suite Chapter 21 built for Atlas's own code
     against a candidate version, in a throwaway environment, and report
     whether it still passes - before anyone adopts the upgrade."""
-    proc = subprocess.run(  # <1>
+    proc = subprocess.run(
         [
             "uv", "run", "--isolated",
             "--with", f"{package}=={candidate_version}",
@@ -43,4 +43,4 @@ def check_candidate_upgrade(package: str, candidate_version: str) -> bool:
         ],
         cwd=PROJECT_ROOT,
     )
-    return proc.returncode == 0  # <2>
+    return proc.returncode == 0
