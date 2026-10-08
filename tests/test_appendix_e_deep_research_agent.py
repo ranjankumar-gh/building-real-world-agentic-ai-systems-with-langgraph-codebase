@@ -7,8 +7,10 @@ harness (`atlas.deep_research.deep_research_agent`). Both are unit-tested in
 `tests/test_research.py` and `tests/test_deep_research.py`; this module
 tests the appendix's own comparison claims instead: the table's rows about
 mounting, the shared backend, partial failure, and untrusted source text.
-The last is the one code change the appendix makes: Form 2 carries Chapter
-23's `InjectionGuard` on every model that reads source text.
+The last is the one code change the appendix makes: Form 2 screens source
+text at the source (`source_lookup` runs `screen_untrusted`), and Chapter
+23's `InjectionGuard` on the main agent screens what comes back from a
+sub-agent through `task`, which deepagents returns inside a `Command`.
 
 Mounting, as of the v1.2 revision: Atlas's support graph (`atlas/graph.py`)
 does not mount `research_graph` - no triage route leads to research, so the
@@ -161,9 +163,9 @@ def _guard_script(seen_by: dict[str, list[str]]):
 
 
 def test_form_2_screens_source_text_for_every_model_that_reads_it(monkeypatch):
-    """deep_research_agent carries Chapter 23's InjectionGuard on the main
-    agent, on source_researcher, and on the harness's general-purpose
-    sub-agent: an injected source is withheld from all three models, and a
+    """source_lookup screens its own result, so an injected source is
+    withheld from all three models - including the harness's default
+    general-purpose sub-agent, which carries no guard of its own - and a
     clean one reaches them tagged as untrusted content."""
     from langchain_anthropic import ChatAnthropic
 
@@ -187,3 +189,99 @@ def test_form_2_screens_source_text_for_every_model_that_reads_it(monkeypatch):
         assert WITHHELD in seen_by[who], who
     sla = [t for t in seen_by["main"] if "4-hour first response" in t]
     assert sla and sla[0].startswith("<untrusted-content")
+
+
+def test_form_2_uses_the_harness_default_general_purpose_sub_agent():
+    """Screening lives in source_lookup, so no re-declared general-purpose
+    spec (and no import of deepagents' private constant) is needed."""
+    from atlas import deep_research
+
+    assert not hasattr(deep_research, "GENERAL_PURPOSE_SUBAGENT")
+    assert not hasattr(deep_research, "general_purpose")
+
+
+RELAY = "Finding: " + INJECTED
+CLEAN_RELAY = "Finding: the SLA promises a 4-hour first response."
+
+
+def _relay_script(task_results: dict[str, str]):
+    """The main agent delegates a CLEAN source to each sub-agent; the one
+    asked to "relay" answers with an injection phrase it was talked into,
+    the other with a clean finding. Records the `task` results the main
+    model is shown, by tool call id."""
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    def call(name: str, args: dict, call_id: str) -> dict:
+        return {"name": name, "args": args, "id": call_id}
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        system = " ".join(m.text for m in messages if isinstance(m, SystemMessage))
+        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        if "Atlas's deep research agent" in system:
+            task_results.update(
+                {m.tool_call_id: m.text for m in tool_messages}
+            )
+            if tool_messages:
+                msg = AIMessage("main done")
+            else:
+                msg = AIMessage(
+                    "",
+                    tool_calls=[
+                        call(
+                            "task",
+                            {"description": "relay docs.internal/sla",
+                             "subagent_type": "source_researcher"},
+                            "m-sr",
+                        ),
+                        call(
+                            "task",
+                            {"description": "research docs.internal/sla",
+                             "subagent_type": "general-purpose"},
+                            "m-gp",
+                        ),
+                    ],
+                )
+        elif tool_messages:
+            asked = " ".join(m.text for m in messages if isinstance(m, HumanMessage))
+            msg = AIMessage(RELAY if "relay" in asked else CLEAN_RELAY)
+        else:
+            msg = AIMessage(
+                "",
+                tool_calls=[
+                    call("source_lookup", {"source": "docs.internal/sla"}, "sub-1")
+                ],
+            )
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    return _generate
+
+
+def test_a_sub_agent_relay_reaches_the_main_model_screened(monkeypatch):
+    """deepagents' `task` returns a sub-agent's final answer as a Command
+    carrying a ToolMessage. The main agent's InjectionGuard screens that
+    ToolMessage: a relayed injection phrase is withheld, and a clean answer
+    arrives tagged as untrusted content."""
+    from langchain_anthropic import ChatAnthropic
+
+    from atlas.security import WITHHELD
+
+    task_results: dict[str, str] = {}
+    monkeypatch.setattr(ChatAnthropic, "_generate", _relay_script(task_results))
+
+    deep_research_agent.invoke(
+        {"messages": [{"role": "user", "content": "Research the SLA sources."}]},
+        {"configurable": {"thread_id": "appendix-e-relay", "customer_id": "cust-42"}},
+    )
+
+    assert set(task_results) == {"m-sr", "m-gp"}
+    assert task_results["m-sr"] == WITHHELD
+    assert INJECTED not in " ".join(task_results.values())
+    assert task_results["m-gp"] == (
+        '<untrusted-content source="task">' + CLEAN_RELAY + "</untrusted-content>"
+    )

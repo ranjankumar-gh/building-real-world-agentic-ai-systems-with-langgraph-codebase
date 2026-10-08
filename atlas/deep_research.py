@@ -68,19 +68,31 @@ spawns shows up in a trace tree under `source_researcher`, distinguishing
 "three sub-agents spawned" from "the source_researcher ran three times."
 
 Chapter 23, "Security, Privacy, and Governance", applies here too, through
-Appendix E: source text is untrusted content, and three models read it.
-`InjectionGuard` (atlas/security.py) screens every tool result each of them
-sees - the main agent (`source_lookup`, and the `/findings/` files it reads
-back), `source_researcher`, and the harness's general-purpose sub-agent,
-which inherits the main agent's tools. deepagents builds that sub-agent's
-middleware stack WITHOUT the caller's `middleware=`, so it is re-declared
-under its own name with the guard added; the harness then uses that spec in
-place of its default. Chapter 18's printed listing predates the guard.
+Appendix E: source text is untrusted content, and three models read it - the
+main agent, `source_researcher`, and the harness's general-purpose sub-agent,
+which inherits the main agent's tools. Two layers screen it:
+
+- At the source. `source_lookup` runs its own result through
+  `screen_untrusted` before returning it, so every model that calls it reads
+  the text withheld or tagged, however the harness wires that model's
+  middleware. deepagents 0.6.3 builds its default general-purpose sub-agent
+  WITHOUT the caller's `middleware=`; screening in the tool is what covers
+  it, so no re-declared general-purpose spec is needed.
+- At the main agent. `InjectionGuard` on `middleware=` screens every result
+  the main model reads: a `/findings/` file read back, and each sub-agent's
+  answer, which `task` returns inside a `Command`. A source the scan missed
+  can talk a sub-agent into relaying a payload the scan would catch; the
+  guard catches it on the way back. It rescans a `source_lookup` result
+  without wrapping it twice. `source_researcher` carries the guard too, for
+  the files it reads back.
+
+What stays unguarded: the default general-purpose sub-agent's own reads of
+`/findings/` files. Its answer still returns through the main agent's guard.
+Chapter 18's printed listing predates both layers.
 """
 
 from deepagents import create_deep_agent
 from deepagents.backends.store import StoreBackend
-from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_config, get_stream_writer
@@ -88,7 +100,7 @@ from langgraph.runtime import Runtime
 
 from atlas.memory import SAFE_ID, build_dev_store
 from atlas.research import SourceUnavailable, search_source
-from atlas.security import InjectionGuard
+from atlas.security import InjectionGuard, screen_untrusted
 
 
 @tool
@@ -103,9 +115,10 @@ def source_lookup(source: str) -> str:
     writer = get_stream_writer()
     writer({"progress": f"researching {source}"})
     try:
-        return search_source(source)
+        text = search_source(source)
     except SourceUnavailable as exc:
         return f"error: {exc}"  # same partial-failure discipline as Ch17
+    return screen_untrusted(text, source)  # Chapter 23: withheld or tagged
 
 
 source_researcher = {
@@ -118,9 +131,6 @@ source_researcher = {
     "tools": [source_lookup],
     "middleware": [InjectionGuard()],  # Chapter 23: source text is untrusted
 }
-
-# The harness's own general-purpose sub-agent, with the same guard.
-general_purpose = {**GENERAL_PURPOSE_SUBAGENT, "middleware": [InjectionGuard()]}
 
 
 def research_namespace(runtime: Runtime) -> tuple[str, str, str]:
@@ -150,7 +160,7 @@ deep_research_agent = create_deep_agent(
         "each to source_researcher via the task tool, track progress with write_todos, "
         "and compose a final report from the files under /findings/."
     ),
-    subagents=[source_researcher, general_purpose],
+    subagents=[source_researcher],
     middleware=[InjectionGuard()],
     backend=StoreBackend(store=store, namespace=research_namespace),
     checkpointer=checkpointer,

@@ -15,9 +15,12 @@ a tool. This module adds both:
   `RoleAuthorityGate` runs BEFORE `AuthorityGate` in the middleware stack,
   so an unauthorized role never reaches the approval-required check at all.
 - `tag_untrusted` / `scan_for_injection` / `InjectionGuard` - every tool
-  result (search_kb, lookup_ticket, MCP results) is scanned for
-  injection-like phrasing and, if clean, wrapped as untrusted content
+  result (search_kb, lookup_ticket, MCP results, and each ToolMessage a
+  tool returns inside a `Command`, as deepagents' `task` does) is scanned
+  for injection-like phrasing and, if clean, wrapped as untrusted content
   before it becomes part of the conversation the model reasons over next.
+  A result a tool already screened at its source (`screen_untrusted`) is
+  scanned again but not wrapped twice.
   `atlas/resolve.py`'s `reference_text` applies the same two helpers to
   the retrieved articles and the recalled profile the mounted agent reads
   as reference text. Neither applies to the user's own message.
@@ -40,11 +43,11 @@ the fallback for an agent run with no store at all, as a unit test does."""
 import html
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, convert_to_messages
 from langgraph.runtime import Runtime
 from langgraph.store.base import BaseStore
 from langgraph.types import Command
@@ -204,25 +207,53 @@ def screen_untrusted(text: str, source: str) -> str:
     return WITHHELD if scan_for_injection(text) else tag_untrusted(text, source)
 
 
+# A result that was already screened where it was produced: one wrapper,
+# nothing inside it that can form a tag (`tag_untrusted` escaped it).
+_TAGGED = re.compile(
+    r'<untrusted-content source="[^"<>]*">([^<>]*)</untrusted-content>'
+)
+
+
+def _rescreen(content: Content, source: str) -> Content | None:
+    """`screen_untrusted` for a tool result; None means withhold it. Text a
+    tool already screened at its source is scanned again, never re-wrapped."""
+    if isinstance(content, str):
+        if content == WITHHELD:
+            return content
+        if tagged := _TAGGED.fullmatch(content):
+            return None if scan_for_injection(html.unescape(tagged[1])) else content
+    return None if scan_for_injection(content) else tag_untrusted(content, source)
+
+
 class InjectionGuard(AgentMiddleware):
     """Scans every tool result and tags a clean one as untrusted. Runs on
-    what a tool RETURNS (search_kb, lookup_ticket, MCP results), never on
-    the user's own message."""
+    what a tool RETURNS (search_kb, lookup_ticket, MCP results, a deep
+    agent's `task` relay), never on the user's own message."""
+
+    def _screen_message(self, message: ToolMessage, source: str) -> ToolMessage:
+        content = _rescreen(message.content, source)
+        if content is None:
+            return ToolMessage(  # <1>
+                WITHHELD, tool_call_id=message.tool_call_id, status="error"
+            )
+        message.content = content
+        return message
 
     def _screen(
         self, request: ToolCallRequest, response: ToolMessage | Command
     ) -> ToolMessage | Command:
-        if not isinstance(response, ToolMessage):
-            return response  # a Command carries no content to scan
-        if scan_for_injection(response.content):
-            return ToolMessage(  # <1>
-                WITHHELD,
-                tool_call_id=request.tool_call["id"],
-                status="error",
-            )
-        tool_name = request.tool_call["name"]
-        response.content = tag_untrusted(response.content, source=tool_name)
-        return response
+        source = request.tool_call["name"]
+        if isinstance(response, ToolMessage):
+            return self._screen_message(response, source)
+        update = response.update  # <2>
+        if not isinstance(update, dict) or "messages" not in update:
+            return response  # nothing in it reaches the model as a message
+        raw = update["messages"]
+        messages = [
+            self._screen_message(m, source) if isinstance(m, ToolMessage) else m
+            for m in convert_to_messages(raw if isinstance(raw, list) else [raw])
+        ]
+        return replace(response, update={**update, "messages": messages})
 
     def wrap_tool_call(
         self,
@@ -245,3 +276,11 @@ class InjectionGuard(AgentMiddleware):
 #    it - which is exactly what Exercise 2 asks you to build, because
 #    choosing between "block" and "escalate" is a real design decision this
 #    chapter's code deliberately doesn't make for you.
+# 2. A tool can return a `Command` instead of a ToolMessage, and the
+#    ToolMessage inside its `update` still reaches the model. deepagents'
+#    `task` tool returns a sub-agent's final answer that way, so a source the
+#    scan missed could talk the sub-agent into relaying a payload the scan
+#    would catch. Each ToolMessage in the update is screened like a plain
+#    result; the rest of the update (files, todos) passes through. A Command
+#    whose update is not a dict carries no messages the guard can reach;
+#    neither deepagents nor Atlas returns one.
