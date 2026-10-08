@@ -214,14 +214,24 @@ _TAGGED = re.compile(
 )
 
 
+# The tools that run `screen_untrusted` on their own result. Only these may
+# hand back a wrapper; from any other tool, a wrapper is the tool's output.
+SCREENED_AT_SOURCE = frozenset({"source_lookup"})
+
+
 def _rescreen(content: Content, source: str) -> Content | None:
-    """`screen_untrusted` for a tool result; None means withhold it. Text a
-    tool already screened at its source is scanned again, never re-wrapped."""
+    """`screen_untrusted` for a tool result; None means withhold it. A tool
+    in SCREENED_AT_SOURCE keeps its own wrapper once rescanned; any other
+    tool's wrapper is opened, scanned and re-tagged under its own name."""
     if isinstance(content, str):
-        if content == WITHHELD:
+        prescreened = source in SCREENED_AT_SOURCE
+        if content == WITHHELD and prescreened:
             return content
         if tagged := _TAGGED.fullmatch(content):
-            return None if scan_for_injection(html.unescape(tagged[1])) else content
+            inner = html.unescape(tagged[1])
+            if scan_for_injection(inner):
+                return None
+            return content if prescreened else tag_untrusted(inner, source)
     return None if scan_for_injection(content) else tag_untrusted(content, source)
 
 
