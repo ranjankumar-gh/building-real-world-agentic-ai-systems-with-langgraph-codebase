@@ -37,12 +37,13 @@ def test_langgraph_json_is_valid_json_with_the_expected_top_level_keys():
 def test_langgraph_json_serves_the_resolved_graph_research_and_the_monitor():
     """`resolve` is the production assembly (the mounted agent and its gates),
     not atlas/graph.py's model-free `graph`; `monitor` is the graph Chapter
-    22's cron targets."""
+    22's cron targets; `sla-watch` is the graph Chapter 27's cron targets."""
     config = _load_config()
     assert config["graphs"] == {
         "resolve": "./atlas/deploy/server.py:resolve",
         "research": "./atlas/research.py:research_graph",
         "monitor": "./atlas/deploy/server.py:monitor",
+        "sla-watch": "./atlas/deploy/server.py:sla_watch",
     }
 
 

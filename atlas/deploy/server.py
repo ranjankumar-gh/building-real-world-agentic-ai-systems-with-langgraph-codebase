@@ -24,7 +24,12 @@ gate refuses every tool call (Chapter 23).
 
 `monitor` is a one-node graph around Chapter 21's `run_quality_monitor`, so
 `atlas/deploy/schedule.py`'s cron has a graph to run: input
-`{"sample_rate": float}`."""
+`{"sample_rate": float}`.
+
+Chapter 27 adds a fourth served graph, `sla_watch` (`"sla-watch"` in
+`langgraph.json`): `atlas/sla_watch.py`'s SLA Watch, compiled the same way,
+with neither a checkpointer nor a store, and with the served gate, whose
+approver is the run's authenticated identity. Its cron sends `{}`."""
 
 from collections.abc import Awaitable, Callable
 from typing import TypedDict
@@ -38,6 +43,7 @@ from atlas.auth import context_for
 from atlas.graph import _make_builder, triage
 from atlas.resolve import _agent_turn, mount_resolve_agent, reference_text
 from atlas.security import AtlasContext
+from atlas.sla_watch import build_served_sla_watch
 from atlas.state import AtlasState
 
 
@@ -105,6 +111,7 @@ def build_monitor_graph() -> Pregel:
 
 resolve = build_served_graph()
 monitor = build_monitor_graph()
+sla_watch = build_served_sla_watch()
 
 # 1. An explicit `context=` replaces whatever the parent run carried, so a
 #    `context` the HTTP caller sent never reaches the gates. `context_for`

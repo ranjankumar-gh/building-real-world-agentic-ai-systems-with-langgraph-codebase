@@ -148,6 +148,9 @@ def test_the_cron_and_webhook_inputs_fit_the_graphs_they_target(monkeypatch):
 
 
 def test_schedule_sla_watch_targets_the_sla_watch_assistant_hourly(monkeypatch):
+    """Kept, unlike the monitor's cron: a stateless cron run is otherwise
+    temporary (no checkpointer, thread deleted when the run ends), which
+    would throw away every approval SLA Watch pauses for."""
     fake = _FakeClient("http://localhost:8123")
     monkeypatch.setattr(schedule_module, "get_client", lambda url: fake)
 
@@ -155,8 +158,39 @@ def test_schedule_sla_watch_targets_the_sla_watch_assistant_hourly(monkeypatch):
 
     assert result == {"cron_id": "cron-1"}
     assert fake.crons.calls == [
-        {"assistant_id": "sla-watch", "schedule": "0 * * * *", "input": {}}
+        {
+            "assistant_id": "sla-watch",
+            "schedule": "0 * * * *",
+            "input": {},
+            "on_run_completed": "keep",
+        }
     ]
+
+
+def test_the_sla_watch_cron_input_runs_on_the_served_graph():
+    """The cron's `{}` is a valid input for the graph `sla-watch` serves."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from atlas.deploy.server import sla_watch
+    from atlas.tools import _SLA_TICKETS
+
+    graph = sla_watch.copy(
+        update={"checkpointer": InMemorySaver(), "store": InMemoryStore()}
+    )
+    sent_before = len(_SLA_TICKETS.sent)
+    out = graph.invoke({}, {"configurable": {"thread_id": "cron-input"}})
+
+    assert out["__interrupt__"][0].value["drafts"][0]["ticket_id"] == "T-2001"
+    assert len(_SLA_TICKETS.sent) == sent_before  # paused: nothing sent yet
+
+
+def test_the_pinned_sdk_accepts_on_run_completed():
+    import inspect
+
+    from langgraph_sdk.client import CronClient
+
+    assert "on_run_completed" in inspect.signature(CronClient.create).parameters
 
 
 def test_schedule_sla_watch_uses_the_given_url_and_schedule(monkeypatch):

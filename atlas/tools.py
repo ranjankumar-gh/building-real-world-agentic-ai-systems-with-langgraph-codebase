@@ -126,10 +126,11 @@ class _SLATicketBackend:
         self._receipts: dict[str, str] = {}  # idempotency ledger, keyed
 
     def reset(self) -> None:
-        """Clear the send record and the idempotency ledger. For tests only:
-        the ledger is deliberately process-global (that is what makes it work
-        across a replay), so without this one test's send suppresses the
-        next test's identical key."""
+        """Clear the send record and the idempotency ledger. For tests and
+        the eval target (`atlas/evals.py`'s `run_sla_watch`) only: the ledger
+        is deliberately process-global (that is what makes it work across a
+        replay), so without this one run's send suppresses the next run's
+        identical key."""
         self.sent.clear()
         self._receipts.clear()
 
@@ -150,8 +151,8 @@ class _SLATicketBackend:
 
 _SLA_TICKETS = _SLATicketBackend(
     [
-        {"ticket_id": "T-2001", "hours_open": 30},  # past the 24h threshold
-        {"ticket_id": "T-2002", "hours_open": 10},  # not yet at risk
+        {"ticket_id": "T-2001", "customer_id": "C-2", "hours_open": 30},  # at risk
+        {"ticket_id": "T-2002", "customer_id": "C-3", "hours_open": 10},  # not yet
     ]
 )
 

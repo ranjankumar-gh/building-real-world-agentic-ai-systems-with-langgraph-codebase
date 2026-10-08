@@ -126,7 +126,7 @@ def test_web_search_tool_reports_no_match_for_an_unrelated_query():
 def test_list_at_risk_tickets_returns_only_tickets_past_the_threshold():
     result = list_at_risk_tickets.invoke({"threshold_hours": 24})
 
-    assert result == [{"ticket_id": "T-2001", "hours_open": 30}]
+    assert result == [{"ticket_id": "T-2001", "customer_id": "C-2", "hours_open": 30}]
 
 
 def test_list_at_risk_tickets_returns_nothing_for_an_unreachable_threshold():

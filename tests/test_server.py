@@ -48,7 +48,7 @@ def _served(monkeypatch) -> tuple[Any, _RecordingAgent]:
 
 
 def test_the_served_graphs_bring_no_checkpointer_and_no_store():
-    for graph in (server.resolve, server.monitor):
+    for graph in (server.resolve, server.monitor, server.sla_watch):
         assert graph.checkpointer is None
         assert graph.store is None
 

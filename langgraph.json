@@ -3,7 +3,8 @@
   "graphs": {
     "resolve": "./atlas/deploy/server.py:resolve",
     "research": "./atlas/research.py:research_graph",
-    "monitor": "./atlas/deploy/server.py:monitor"
+    "monitor": "./atlas/deploy/server.py:monitor",
+    "sla-watch": "./atlas/deploy/server.py:sla_watch"
   },
   "env": ".env",
   "python_version": "3.12"

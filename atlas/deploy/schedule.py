@@ -28,9 +28,13 @@ real infrastructure, the same category as Chapter 20's LangSmith or Chapter
 (what gets passed to `langgraph_sdk`) and skip-guards anything that would
 actually dial a server.
 
-Chapter 27, "Capstone", adds `schedule_sla_watch` - the same stateless-cron
-shape as `schedule_quality_monitor`, targeting the `sla-watch` assistant
-hourly instead of `monitor` every 15 minutes."""
+Chapter 27, "Capstone", adds `schedule_sla_watch`: the same stateless cron
+as `schedule_quality_monitor`, targeting the `sla-watch` assistant hourly,
+with one difference. A stateless cron run is temporary by default: the
+server runs it without a checkpointer and deletes its thread when the run
+ends, paused or not. SLA Watch pauses at its approval gate, so its cron
+passes `on_run_completed="keep"`, or every pending approval would be thrown
+away while the store kept the ticket claimed."""
 
 from langgraph_sdk import get_client
 
@@ -51,22 +55,25 @@ async def schedule_quality_monitor(
 
 async def schedule_sla_watch(
     url: str = "http://localhost:8123",
-    schedule: str = "0 * * * *",  # hourly
+    schedule: str = "0 * * * *",  # hourly, UTC
 ) -> dict:
-    """Chapter 27, "Capstone": SLA Watch's own stateless cron - a fresh
-    thread per hourly trigger, the same shape as
-    `schedule_quality_monitor` above (each triggered run is independent of
-    the last one, mirroring Chapter 21's online monitor). "Stateless"
-    describes the cron's own scheduling, not the run it triggers: any GIVEN
-    triggered run still gets a normal `thread_id` and Chapter 9's full
-    checkpointer, and can sit suspended at the approval gate for as long as
-    a reviewer takes."""
+    """Chapter 27, "Capstone": SLA Watch's hourly cron, a fresh thread per
+    trigger, kept after the run so a paused approval can be resumed."""
     client = get_client(url=url)
     return await client.crons.create(
         assistant_id="sla-watch",
         schedule=schedule,
         input={},
+        on_run_completed="keep",  # <2>
     )
+
+
+# 1. With no `on_run_completed`, the run is temporary: no checkpointer, and
+#    the thread is deleted when it ends. Right for the monitor, which keeps
+#    nothing between runs.
+# 2. SLA Watch's run pauses at `approval_gate`; "keep" keeps its thread and
+#    checkpoints until a reviewer resumes it. The cost is one kept thread
+#    per trigger.
 
 
 async def notify_on_research_complete(
