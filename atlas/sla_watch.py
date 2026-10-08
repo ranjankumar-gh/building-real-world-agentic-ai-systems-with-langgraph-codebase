@@ -46,7 +46,8 @@ gate), so a decision there proves nothing about who approved it. The send
 reads the gate's own row, as Chapter 23's refund does, and sends only when
 the row is a check-in approval on this thread, for this ticket and
 customer, for exactly this message (by its SHA-256), signed on the served
-build by the approver resuming the run, and not already sent. Each
+build by the approver resuming the run, and only when no "checkin_send"
+row already records a send for the ticket. Each
 attempted send is a "checkin_send" row: sent, replayed, or why not.
 
 A scan that finds nothing at risk ends there (Chapter 6's routing): no
@@ -159,7 +160,9 @@ def draft_checkins(state: SLAWatchState, runtime: Runtime) -> dict:
         "claimed_at": datetime.now(UTC).isoformat(),
     }
     for draft in drafts:
-        runtime.store.put(flagged_ns(), draft["ticket_id"], claim)   # <3>
+        flag = runtime.store.get(flagged_ns(), draft["ticket_id"])
+        if flag is None or flag.value.get("status") != "sent":   # <3>
+            runtime.store.put(flagged_ns(), draft["ticket_id"], claim)
     return {"drafts": drafts}
 
 
@@ -182,6 +185,8 @@ def release_claim(runtime: Runtime, ticket_id: str) -> None:
 #    empty approval request every hour.
 # 3. The claim names its thread and its time, so `release_claim` touches
 #    only its own and `claim_holds` can tell a live claim from a stale one.
+#    A run that scanned before another run sent never claims over the
+#    "sent" flag, so its reject cannot release the record of that send.
 
 
 def checkin_refusal(ticket_id: str, message: Any) -> str | None:
@@ -378,22 +383,15 @@ def make_send_checkins(served: bool) -> Callable[[SLAWatchState, Runtime], dict]
 
 
 def deliver(runtime: Runtime, draft: dict, row: dict, approval_key: str) -> str:
-    """Send the approved text once per approval row, and flag the ticket."""
+    """Send the approved text once per ticket, and flag the ticket."""
     store, ticket_id = runtime.store, draft["ticket_id"]
-    flag = store.get(flagged_ns(), ticket_id)
-    if flag and flag.value.get("status") == "sent" and (
-        flag.value.get("thread_id") != thread_of(runtime)
-    ):
-        return f"refused: {ticket_id} already had a check-in"   # <4>
     sent_before = store.search(
         audit_ns(draft.get("customer_id") or "unknown"),
-        filter={
-            "event": "checkin_send",
-            "approval_key": approval_key,
-            "outcome": "sent",
-        },
+        filter={"event": "checkin_send", "ticket_id": ticket_id, "outcome": "sent"},
         limit=1,
     )
+    if sent_before and sent_before[0].value.get("approval_key") != approval_key:
+        return f"refused: {ticket_id} already had a check-in"   # <4>
     if not sent_before:
         send_checkin.invoke(
             {"key": row["key"], "ticket_id": ticket_id, "message": row["message"]}
@@ -417,8 +415,10 @@ send_checkins = make_send_checkins(served=False)
 #    row in the audit namespace, which no caller reaches (atlas/auth.py).
 # 3. Every attempted send leaves a "checkin_send" row, a refusal included,
 #    so a forged decision is on record rather than silent.
-# 4. Another thread already checked in on this ticket (its claim had
-#    lapsed and a later scan re-drafted it): one check-in per ticket.
+# 4. A check-in already went out on this ticket under another approval:
+#    a lapsed claim re-drafted it, or two runs scanned it before either
+#    drafted. The "sent" flag can be overwritten; the append-only
+#    "checkin_send" row cannot, so that row is what decides.
 # 5. The text sent is the row's, and the key carries its hash, so a replay
 #    after a crash collapses onto the send that already went out.
 

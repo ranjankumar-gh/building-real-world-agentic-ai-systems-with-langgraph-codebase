@@ -25,6 +25,7 @@ from langgraph.types import Command
 
 from atlas.audit import audit_ns
 from atlas.sla_watch import (
+    _builder,
     CLAIM_TTL,
     build_served_sla_watch,
     build_sla_watch_graph,
@@ -544,6 +545,68 @@ def test_a_second_scan_on_the_same_store_skips_an_already_flagged_ticket():
 
     assert "__interrupt__" not in second
     assert len(_SLA_TICKETS.sent) == 1
+
+
+def _race(store: InMemoryStore) -> tuple[object, dict]:
+    """Two runs scan T-2001 before either drafts it (a cron and a manual
+    run, or a run paused between supersteps). Run A drafts, is approved and
+    sends; run B is left paused before its own draft, and returned."""
+    first = build_sla_watch_graph(store=store)
+    second = _builder(served=False).compile(
+        checkpointer=InMemorySaver(),
+        store=store,
+        interrupt_before=["draft_checkins"],
+    )
+    config_b = _config("race-B")
+    second.invoke({}, config_b)  # B scanned T-2001 before A's claim existed
+    config_a = _config("race-A")
+    first.invoke({}, config_a)
+    first.invoke(Command(resume=[APPROVE]), config_a)
+    assert len(_SLA_TICKETS.sent) == 1
+    second.invoke(None, config_b)  # B drafts after A sent
+    return second, config_b
+
+
+def test_a_lagging_run_cannot_send_a_second_checkin():
+    store = InMemoryStore()
+    second, config = _race(store)
+    edit = {"type": "edit", "ticket_id": "T-2001", "edited_message": "T-2001 again"}
+
+    second.invoke(Command(resume=[edit]), config)
+
+    assert _sent() == [("T-2001", TEMPLATE)]
+    outcomes = [r["outcome"] for r in _rows(store, event="checkin_send")]
+    assert outcomes == ["sent", "refused: T-2001 already had a check-in"]
+
+
+def test_a_lagging_run_that_rejects_keeps_the_sent_record():
+    store = InMemoryStore()
+    second, config = _race(store)
+
+    second.invoke(Command(resume=[REJECT]), config)
+
+    assert store.get(flagged_ns(), "T-2001").value["status"] == "sent"
+    again = build_sla_watch_graph(store=store).invoke({}, _config("race-C"))
+    assert "__interrupt__" not in again  # not re-drafted
+    assert len(_SLA_TICKETS.sent) == 1
+
+
+def test_a_send_on_record_refuses_another_even_with_the_flag_gone():
+    """The flag is a convenience the scan reads; the durable record of a
+    send is the append-only checkin_send row, and deliver reads that."""
+    store = InMemoryStore()
+    first, second = _runtime(store, "th-1"), _runtime(store, "th-2")
+    edit = {"type": "edit", "ticket_id": "T-2001", "edited_message": "T-2001, again"}
+    one = _gated(first, checked_decision(DRAFT, APPROVE))
+    send_checkins({"drafts": [DRAFT], "decisions": [one]}, first)
+    store.put(flagged_ns(), "T-2001", _claim("th-2"))  # the flag overwritten
+
+    two = _gated(second, checked_decision(DRAFT, edit))
+    send_checkins({"drafts": [DRAFT], "decisions": [two]}, second)
+
+    assert _sent() == [("T-2001", "original T-2001")]
+    outcomes = [r["outcome"] for r in _rows(store, event="checkin_send")]
+    assert outcomes == ["sent", "refused: T-2001 already had a check-in"]
 
 
 def test_the_graph_is_named_so_its_root_run_is_not_langgraph():
