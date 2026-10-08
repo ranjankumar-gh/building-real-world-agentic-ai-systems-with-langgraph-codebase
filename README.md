@@ -3,10 +3,11 @@
 Companion repository for *Building Real-World Agentic AI Systems with LangGraph*. Builds one
 running project, **Atlas**, incrementally across the book's chapters.
 
-Atlas starts as a customer-support assistant and later grows two extensions that justify a
-multi-agent boundary: an internal-data agent and a research agent. All backends (knowledge base,
-ticket API, research corpus) ship as small seeded, in-memory fakes inline in the module that owns
-them (`_KB`/`_TICKETS` in `atlas/tools.py`, `_REFUNDS`/`_LEDGER` in `atlas/effects.py`, plus the
+Atlas starts as a customer-support assistant and later grows a research extension that justifies a
+multi-agent boundary: a supervisor with a web specialist and an internal-docs specialist, which
+Chapter 18 rebuilds as a Deep Research Agent. All backends (knowledge base, ticket API, research
+corpus) ship as small seeded, in-memory fakes inline in the module that owns them
+(`_KB`/`_TICKETS` in `atlas/tools.py`, `_REFUNDS`/`_LEDGER` in `atlas/effects.py`, plus the
 Chapter 1/2 stand-ins in `atlas/naive.py`/`atlas/hello.py`) - everything here runs locally, with no
 external accounts.
 
@@ -74,10 +75,10 @@ without one - they are not required for the rest of the suite to pass.
 
 | Path | Reader | Chapters |
 | --- | --- | --- |
-| Atlas fast path | Engineer shipping a first reliable agent | 1-13, 16-17, 19-23, 27 |
+| Atlas fast path | Engineer shipping a first reliable agent | 1-13, 16-17, 19-27 |
 | Architecture path | Tech lead choosing a stack | 1-3, 15-18, 21-26 |
 | Multi-agent path | Practitioner with a single-agent baseline | 5, 12, 15-18, 21, 23 |
-| Migration path | LangGraph/LangChain 0.x user | 2, Appendix B, Appendix C, then 4-11 |
+| Migration path | LangGraph/LangChain 0.x user | 2, Appendix B, Appendix C, then 4-11, 22, 26 |
 
 Each chapter's end state is a tag named for its file stem - `git tag --list` prints them all, and
 `git checkout ch09-persistence-checkpointing` gets you Atlas exactly as that chapter left it.
