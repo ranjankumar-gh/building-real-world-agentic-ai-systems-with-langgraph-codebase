@@ -74,7 +74,7 @@ without one - they are not required for the rest of the suite to pass.
 
 | Path | Reader | Chapters |
 | --- | --- | --- |
-| Atlas fast path | Engineer shipping a first reliable agent | 1-13, 19-23, 27 |
+| Atlas fast path | Engineer shipping a first reliable agent | 1-13, 16-17, 19-23, 27 |
 | Architecture path | Tech lead choosing a stack | 1-3, 15-18, 21-26 |
 | Multi-agent path | Practitioner with a single-agent baseline | 5, 12, 15-18, 21, 23 |
 | Migration path | LangGraph/LangChain 0.x user | 2, Appendix B, Appendix C, then 4-11 |
