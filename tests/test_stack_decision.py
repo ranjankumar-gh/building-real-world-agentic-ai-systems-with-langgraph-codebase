@@ -7,8 +7,7 @@ batch pipeline) are reproduced directly as tests, plus the two
 "deserves its own branch" edge cases the 2x2 shape exists to get right:
 a project needing durability without unpredictable branching (Case 3 -
 the one a chain that answers after the branching check alone misroutes),
-and a project
-needing unpredictable branching without durability."""
+and a project needing unpredictable branching without durability."""
 
 from atlas.stack_decision import ProjectShape, recommend
 
