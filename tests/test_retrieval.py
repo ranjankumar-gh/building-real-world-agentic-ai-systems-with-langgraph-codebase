@@ -1,7 +1,8 @@
 """Appendix G, "Retrieval for Atlas (the RAG the Book Assumes)" -
 atlas/retrieval.py: chunk_article, cosine_similarity, EmbeddedKB, the
-search_kb_embedded node adapter, and the search_kb_impl/recall_at_k
-functions the appendix prints.
+search_kb_embedded node adapter and its bound drop-in make_search_kb, the
+lock around the lazy index, and the search_kb_impl/recall_at_k functions
+the appendix prints.
 
 `EmbeddedKB` calls `default_embeddings()` (which needs a live
 OPENAI_API_KEY) on its first search unless an `embeddings=` object is
@@ -18,6 +19,8 @@ skip-guarded and exercises the real `default_embeddings()` path - see
 
 import hashlib
 import os
+import threading
+import time
 
 import pytest
 
@@ -31,6 +34,7 @@ from atlas.retrieval import (
     chunk_article,
     cosine_similarity,
     default_embeddings,
+    make_search_kb,
     recall_at_k,
     search_kb_embedded,
     search_kb_impl,
@@ -236,7 +240,7 @@ def test_search_kb_embedded_with_no_question_returns_nothing():
 
 def test_retrieve_with_the_embedded_adapter_routes_a_hit_to_answer(monkeypatch):
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
-    monkeypatch.setattr(graph, "search_kb", lambda m: search_kb_embedded(m, kb))
+    monkeypatch.setattr(graph, "search_kb", make_search_kb(kb))
 
     state = _ask("Refunds are available")
     update = graph.retrieve(state)
@@ -250,7 +254,7 @@ def test_retrieve_with_the_embedded_adapter_escalates_a_provider_outage(
 ):
     failing = _FailingEmbeddings()
     kb = EmbeddedKB(embeddings=failing)
-    monkeypatch.setattr(graph, "search_kb", lambda m: search_kb_embedded(m, kb))
+    monkeypatch.setattr(graph, "search_kb", make_search_kb(kb))
 
     state = _ask("Refunds are available")
     update = graph.retrieve(state)
@@ -264,7 +268,7 @@ def test_retrieve_with_the_embedded_adapter_retries_a_miss_then_escalates(
     monkeypatch,
 ):
     kb = EmbeddedKB(embeddings=_FakeEmbeddings())
-    monkeypatch.setattr(graph, "search_kb", lambda m: search_kb_embedded(m, kb))
+    monkeypatch.setattr(graph, "search_kb", make_search_kb(kb))
 
     state = _ask("zzz qqq xxx")
     routes = []
@@ -273,6 +277,83 @@ def test_retrieve_with_the_embedded_adapter_retries_a_miss_then_escalates(
         routes.append(graph.route_after_retrieve(state))
 
     assert routes == ["retrieve", "retrieve", "escalate"]
+
+
+def test_make_search_kb_is_a_one_argument_drop_in_for_helpers_search_kb():
+    kb = EmbeddedKB(embeddings=_FakeEmbeddings())
+    search = make_search_kb(kb)
+
+    question = [HumanMessage("Refunds are available")]
+    assert search(question) == search_kb_embedded(question, kb)
+    assert search([]) == []
+
+
+def test_make_search_kb_with_no_kb_searches_the_shared_index(monkeypatch):
+    monkeypatch.setattr(retrieval, "_default_kb", None)
+    monkeypatch.setattr(retrieval, "default_embeddings", _FakeEmbeddings)
+
+    docs = make_search_kb()([HumanMessage("Refunds are available")])
+
+    assert docs and docs[0]["id"] == "kb:refund window#0"
+    assert retrieval._default_kb is not None
+
+
+class _SlowCountingEmbeddings(_FakeEmbeddings):
+    """Slow enough that unsynchronised first searches would overlap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+        self._count_lock = threading.Lock()
+
+    def embed_query(self, text: str) -> list[float]:
+        with self._count_lock:
+            self.calls += 1
+        time.sleep(0.01)
+        return super().embed_query(text)
+
+
+def _at_once(n: int, fn) -> list:
+    barrier = threading.Barrier(n)
+    results: list = [None] * n
+
+    def run(i: int) -> None:
+        barrier.wait()
+        results[i] = fn()
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def test_concurrent_first_searches_build_the_index_once():
+    embeddings = _SlowCountingEmbeddings()
+    kb = EmbeddedKB(embeddings=embeddings)
+    chunks = sum(len(chunk_article(text)) for text in _KB.values())
+
+    _at_once(8, lambda: kb.search("Refunds are available"))
+
+    assert embeddings.calls == chunks + 8  # one build, one query embed each
+
+
+def test_concurrent_first_callers_share_one_default_kb(monkeypatch):
+    monkeypatch.setattr(retrieval, "_default_kb", None)
+    built: list[EmbeddedKB] = []
+
+    class _SlowKB(EmbeddedKB):
+        def __init__(self) -> None:
+            time.sleep(0.01)
+            super().__init__(embeddings=_FakeEmbeddings())
+            built.append(self)
+
+    monkeypatch.setattr(retrieval, "EmbeddedKB", _SlowKB)
+
+    kbs = _at_once(8, retrieval.shared_kb)
+
+    assert len(built) == 1 and all(kb is built[0] for kb in kbs)
 
 
 # --- search_kb_impl and recall_at_k ----------------------------------------

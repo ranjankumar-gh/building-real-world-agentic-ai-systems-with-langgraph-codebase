@@ -13,8 +13,14 @@ article, embed every chunk, and answer a query with the closest chunks as
 
 It is NOT wired in as the default. `atlas/helpers.py`'s dict-backed adapter
 stays what every chapter's code and tests run against - the book's "no
-external account, no network call" promise. `search_kb_embedded` is the
-drop-in a deployment puts in that adapter's place.
+external account, no network call" promise. `make_search_kb()` returns the
+drop-in a deployment puts in that adapter's place: a one-argument
+`search(messages)`, the same signature as `atlas.helpers.search_kb`, with
+the index bound (the shared one unless you pass your own `EmbeddedKB`).
+
+The index is built once, on the first search, under a lock: `retrieve`'s
+async form runs searches on worker threads, and concurrent first requests
+would otherwise each embed the whole knowledge base.
 
 Nothing here touches the provider until the first search: importing the
 module, or constructing an `EmbeddedKB`, needs no key. Every provider call
@@ -29,7 +35,10 @@ embedding model across write and query.
 
 from __future__ import annotations
 
+import functools
 import math
+import threading
+from collections.abc import Callable
 from typing import Protocol
 
 from atlas.helpers import _last_user_text
@@ -82,23 +91,26 @@ class EmbeddedKB:
     def __init__(self, embeddings: Embeddings | None = None) -> None:
         self._embeddings = embeddings  # None: default_embeddings() on first use
         self._index: list[tuple[str, str, list[float]]] | None = None
+        self._lock = threading.RLock()  # one build, however many first requests
 
     def _embed(self, text: str) -> list[float]:
         try:
-            if self._embeddings is None:
-                self._embeddings = default_embeddings()
+            with self._lock:
+                if self._embeddings is None:
+                    self._embeddings = default_embeddings()
             return self._embeddings.embed_query(text)
         except Exception as exc:  # any provider failure: escalate, never retry
             raise KnowledgeBaseUnavailable(f"embedding provider: {exc}") from exc
 
     def _build_index(self) -> list[tuple[str, str, list[float]]]:
-        if self._index is None:
-            self._index = [
-                (f"kb:{article_id}#{n}", chunk, self._embed(chunk))
-                for article_id, text in _KB.items()
-                for n, chunk in enumerate(chunk_article(text))
-            ]
-        return self._index
+        with self._lock:  # a failed build leaves None, so the next one retries
+            if self._index is None:
+                self._index = [
+                    (f"kb:{article_id}#{n}", chunk, self._embed(chunk))
+                    for article_id, text in _KB.items()
+                    for n, chunk in enumerate(chunk_article(text))
+                ]
+            return self._index
 
     def search(self, query: str, k: int = 3) -> list[Doc]:
         """The top k chunks by cosine similarity, as the `Doc`s the
@@ -112,25 +124,38 @@ class EmbeddedKB:
         return [doc for doc in top if doc["score"] > NO_MATCH_BELOW]
 
 
-def search_kb_embedded(messages: list, kb: EmbeddedKB) -> list[Doc]:
-    """Drop-in for `atlas.helpers.search_kb`: same messages in, same `Doc`s
-    out, so `retrieve`, `select_docs` and the escalation path are unchanged."""
-    query = _last_user_text(messages)
-    return kb.search(query) if query else []
-
-
 _default_kb: EmbeddedKB | None = None
+_default_kb_lock = threading.Lock()
+
+
+def shared_kb() -> EmbeddedKB:
+    """The one process-wide `EmbeddedKB`, created on first use."""
+    global _default_kb
+    with _default_kb_lock:
+        if _default_kb is None:
+            _default_kb = EmbeddedKB()
+        return _default_kb
+
+
+def search_kb_embedded(messages: list, kb: EmbeddedKB | None = None) -> list[Doc]:
+    """`atlas.helpers.search_kb` over embeddings: same messages in, same
+    `Doc`s out, so `retrieve`, `select_docs` and the escalation path are
+    unchanged. Searches the shared index unless given a `kb`."""
+    query = _last_user_text(messages)
+    if not query:
+        return []
+    return (kb if kb is not None else shared_kb()).search(query)
+
+
+def make_search_kb(kb: EmbeddedKB | None = None) -> Callable[[list], list[Doc]]:
+    """The drop-in: `search(messages)`, with `kb` bound."""
+    return functools.partial(search_kb_embedded, kb=kb)
 
 
 def search_kb_impl(query: str, k: int = 3, kb: EmbeddedKB | None = None) -> list[Doc]:
     """The appendix's name for a search against one shared, lazily built
     index (or the `kb` passed in)."""
-    global _default_kb
-    if kb is None:
-        if _default_kb is None:
-            _default_kb = EmbeddedKB()
-        kb = _default_kb
-    return kb.search(query, k=k)
+    return (kb if kb is not None else shared_kb()).search(query, k=k)
 
 
 def recall_at_k(
