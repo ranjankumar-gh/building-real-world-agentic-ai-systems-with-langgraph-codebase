@@ -23,7 +23,8 @@ untrusted context. Each article and the profile also pass
 `atlas/security.py`'s `screen_untrusted` (Chapter 23): a text that matches
 the injection scan is withheld, and the rest is wrapped in
 `<untrusted-content>` tags, the same two checks `InjectionGuard` runs on a
-tool result.
+tool result. `mount_resolve_agent` appends `UNTRUSTED_NOTE` to the prompt,
+so the model is told what those tags and a withheld notice mean.
 
 What the wrapper returns: the agent's new turn, found by message id, not by
 length. Verified against the pinned build (langgraph==1.2.6,
@@ -174,12 +175,12 @@ def mount_resolve_agent() -> CompiledStateGraph:
     # MCP adapters and the whole middleware stack, which the offline tests
     # that only need make_resolve_node never use.
     from atlas.agent import RESOLVE_MIDDLEWARE, RESOLVE_PROMPT, RESOLVE_TOOLS, model
-    from atlas.security import AtlasContext
+    from atlas.security import UNTRUSTED_NOTE, AtlasContext
 
     return create_agent(
         model=model,
         tools=RESOLVE_TOOLS,
-        system_prompt=RESOLVE_PROMPT,
+        system_prompt=f"{RESOLVE_PROMPT} {UNTRUSTED_NOTE}",  # Chapter 23
         context_schema=AtlasContext,
         middleware=[*RESOLVE_MIDDLEWARE, ReferenceContext()],  # one more layer
         name="resolve-agent",
