@@ -16,13 +16,18 @@ with the contents, the online appendices (A-G), and where to buy the Kindle and 
 
 ## Tags
 
-Each chapter and appendix has its own git tag, matching the book's own chapter slugs (e.g.
-`ch01-agent-reliability-problem`). Check out a tag to see the codebase exactly as it stood at the
-end of that chapter:
+The book's v1.2 printing matches the
+[`code-v1.2`](https://github.com/ranjankumar-gh/building-real-world-agentic-ai-systems-with-langgraph-codebase/tree/code-v1.2)
+tag. Check it out to run the code as the book prints it:
 
 ```
-git checkout <slug>
+git checkout code-v1.2
 ```
+
+Each chapter and appendix also has its own git tag, matching the book's own chapter slugs (e.g.
+`ch01-agent-reliability-problem`). Those tags are historical: they mark each increment as the
+first printing built it, so a chapter whose code changed in the v1.2 revision no longer matches its
+tag. Use `code-v1.2` for the code the book prints.
 
 ## Running the tests
 
