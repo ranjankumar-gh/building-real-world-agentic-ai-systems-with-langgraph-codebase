@@ -11,6 +11,9 @@ corpus) ship as small seeded, in-memory fakes inline in the module that owns the
 Chapter 1/2 stand-ins in `atlas/naive.py`/`atlas/hello.py`) - everything here runs locally, with no
 external accounts.
 
+**The book:** [langgraph.ranjankumar.in](https://langgraph.ranjankumar.in/) - the landing page,
+with the contents, the online appendices (A-G), and where to buy the Kindle and paperback editions.
+
 ## Tags
 
 Each chapter and appendix has its own git tag, matching the book's own chapter slugs (e.g.
